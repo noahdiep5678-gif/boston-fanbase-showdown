@@ -62,7 +62,7 @@ function StadiumTitle({ onFinish }: { onFinish: () => void }) {
       if (!active) return;
       animation = Animated.sequence([
         Animated.timing(reveal, { toValue: 1, duration: 360, useNativeDriver: true }),
-        Animated.delay(1000),
+        Animated.delay(1500),
         reduceMotion
           ? Animated.delay(1000)
           : Animated.timing(vibration, { toValue: 1, duration: 1000, easing: Easing.linear, useNativeDriver: true }),
