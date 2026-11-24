@@ -1,8 +1,9 @@
-import { getFanSection } from '@/constants/fan-sections';
+import { fanSections, getFanSection } from '@/constants/fan-sections';
 import { supabase } from '@/lib/supabase';
 import { Link, Redirect, useLocalSearchParams } from 'expo-router';
 import { useEffect, useReducer, useRef, useState } from 'react';
 import { AppState, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
+import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 type UpcomingGame = {
   id: number;
@@ -183,7 +184,7 @@ function CelticsQuestionPick({ gameId, startsAt, question }: {
         <Pressable key={choice} accessibilityRole="button"
           accessibilityLabel={`${question.question} ${choice} ${question.threshold}`}
           accessibilityState={{ selected: pick === choice, disabled }} disabled={disabled}
-          style={[styles.option, pick === choice && styles.selected]}
+          style={[styles.option, pick === choice && [styles.selected, { backgroundColor: fanSections[0].gameBackground }]]}
           onPress={() => void savePick(choice)}>
           <Text style={styles.optionText}>{pick === choice ? '✓ ' : ''}
             {choice === 'over' ? 'Over' : 'Under'} {question.threshold}
@@ -238,7 +239,7 @@ function CelticsPickResult() {
   const correct = graded.filter((question) => question.choice === question.correct_choice).length;
 
   return (
-    <View style={styles.card}>
+    <View style={[styles.card, { backgroundColor: fanSections[0].surface }]}>
       <Text style={styles.question}>Latest Celtics result</Text>
       {game && <>
         <Text style={styles.secondary}>
@@ -319,7 +320,7 @@ function CelticsSchedule() {
   const game = schedule?.game;
 
   return (
-    <View style={styles.card}>
+    <View style={[styles.card, { backgroundColor: fanSections[0].surface }]}>
       <Text style={styles.team}>Next Celtics game</Text>
       {game ? (
         <>
@@ -332,6 +333,64 @@ function CelticsSchedule() {
           {!schedule ? 'Loading schedule…' : schedule.error
             ? 'Could not load the Celtics schedule.'
             : 'No Celtics games in the next seven days.'}
+        </Text>
+      )}
+    </View>
+  );
+}
+
+type TeamScheduleGame = Pick<UpcomingGame, 'homeTeam' | 'awayTeam' | 'startsAt'>;
+
+const bostonGameTime = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  weekday: 'short',
+  month: 'short',
+  day: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+  timeZoneName: 'short',
+});
+
+function TeamSchedule({ team, surface }: { team: 'patriots' | 'bruins'; surface: string }) {
+  const name = team === 'patriots' ? 'Patriots' : 'Bruins';
+  const [schedule, setSchedule] = useState<{ game: TeamScheduleGame | null; error?: boolean }>();
+
+  useEffect(() => {
+    let active = true;
+    async function load() {
+      try {
+        const { data, error } = await supabase.functions.invoke<{ game: TeamScheduleGame | null }>(
+          `team-prediction-schedule?team=${team}`,
+          { method: 'GET' },
+        );
+        if (error || !data || (data.game !== null &&
+            (!data.game?.homeTeam || !data.game.awayTeam || !Number.isFinite(Date.parse(data.game.startsAt))))) {
+          throw new Error('Invalid schedule response.');
+        }
+        if (active) setSchedule(data);
+      } catch {
+        if (active) setSchedule({ game: null, error: true });
+      }
+    }
+    void load();
+    return () => { active = false; };
+  }, [team]);
+
+  const game = schedule?.game;
+  return (
+    <View style={[styles.card, { backgroundColor: surface }]}>
+      <Text style={styles.team}>Next {name} game</Text>
+      {game ? (
+        <>
+          <Text style={styles.question}>{game.awayTeam} at {game.homeTeam}</Text>
+          <Text style={styles.secondary}>{bostonGameTime.format(new Date(game.startsAt))}</Text>
+          <Text style={styles.secondary}>Live picks are coming soon.</Text>
+        </>
+      ) : (
+        <Text style={styles.secondary}>
+          {!schedule ? 'Loading schedule…' : schedule.error
+            ? 'Schedule unavailable right now.'
+            : `No ${name} games scheduled in the next seven days.`}
         </Text>
       )}
     </View>
@@ -575,7 +634,7 @@ export default function SportsPredictionsScreen() {
   }
   const predictions = section
     ? allPredictions.filter((item) => item.team === section.name)
-    : allPredictions;
+    : allPredictions.filter((item) => fanSections.some(({ name }) => name === item.team));
   return (
     <PredictionGame
       key={section?.id ?? 'all'}
@@ -596,6 +655,7 @@ function PredictionGame({ predictions, sportId, categoryName }: {
     initialState
   );
   const [shareError, setShareError] = useState('');
+  const theme = getFanSection(sportId) ?? fanSections[0];
   const pickCount = predictions.length;
   const maxPoints = pickCount * POINTS_PER_PICK;
   const selectedCount = predictions.filter((item) => state.picks[item.id] !== undefined).length;
@@ -621,10 +681,12 @@ function PredictionGame({ predictions, sportId, categoryName }: {
   }
 
   return (
-    <SafeAreaView style={styles.screen}>
+    <SafeAreaView style={[styles.screen, { backgroundColor: theme.gameBackground }]}>
+      <StatusBar style="light" />
       <ScrollView contentContainerStyle={styles.content}>
         <Link
           href={sportId ? { pathname: '/fan-challenges', params: { sport: sportId } } : '/'}
+          dismissTo
           style={styles.link}
         >← Back to challenges</Link>
         <Text style={styles.label}>{sportId === 'celtics' ? 'BOSTON SPORTS' : 'BOSTON SPORTS · DEMO'}</Text>
@@ -632,8 +694,11 @@ function PredictionGame({ predictions, sportId, categoryName }: {
         <Text style={styles.team}>{categoryName} challenges</Text>
         {sportId === 'celtics' && <CelticsSchedule />}
         {sportId === 'celtics' && <CelticsPickResult />}
+        {(sportId === 'patriots' || sportId === 'bruins') && (
+          <TeamSchedule team={sportId} surface={theme.surface} />
+        )}
         {sportId !== 'celtics' && <>
-        <View style={styles.notice}>
+        <View style={[styles.notice, { backgroundColor: theme.surface }]}>
           <Text style={styles.noticeTitle}>Fictional practice slate</Text>
           <Text style={styles.secondary}>
             These are sample matchups and invented results, not upcoming games.
@@ -648,7 +713,7 @@ function PredictionGame({ predictions, sportId, categoryName }: {
           const selected = state.picks[item.id];
           const won = selected === item.correctIndex;
           return (
-            <View key={item.id} style={styles.card}>
+            <View key={item.id} style={[styles.card, { backgroundColor: theme.surface }]}>
               <Text style={styles.label}>{item.team.toUpperCase()} · {item.category}</Text>
               <Text style={styles.question}>{item.question}</Text>
               <View style={styles.options}>
@@ -660,7 +725,7 @@ function PredictionGame({ predictions, sportId, categoryName }: {
                     accessibilityState={{ selected: selected === index, disabled: state.stage !== 'picking' }}
                     disabled={state.stage !== 'picking'}
                     onPress={() => dispatch({ type: 'pick', id: item.id, choice: index })}
-                    style={({ pressed }) => [styles.option, selected === index && styles.selected, pressed && styles.pressed]}
+                    style={({ pressed }) => [styles.option, selected === index && [styles.selected, { backgroundColor: theme.gameBackground }], pressed && styles.pressed]}
                   >
                     <Text style={styles.optionText}>{selected === index ? '✓ ' : ''}{choice}</Text>
                   </Pressable>
@@ -689,7 +754,7 @@ function PredictionGame({ predictions, sportId, categoryName }: {
               accessibilityState={{ disabled: !ready }}
               disabled={!ready}
               onPress={() => dispatch({ type: 'lock' })}
-              style={[styles.button, !ready && styles.disabled]}
+              style={[styles.button, { backgroundColor: theme.surface }, !ready && styles.disabled]}
             >
               <Text style={styles.buttonText}>{ready ? `Lock ${pickCount === 1 ? 'your pick' : `all ${pickCount} picks`}` : 'Choose a pick for every question'}</Text>
             </Pressable>
@@ -699,20 +764,20 @@ function PredictionGame({ predictions, sportId, categoryName }: {
           <Pressable
             accessibilityRole="button"
             onPress={() => dispatch({ type: 'settle' })}
-            style={styles.button}
+            style={[styles.button, { backgroundColor: theme.surface }]}
           >
             <Text style={styles.buttonText}>Simulate demo results</Text>
           </Pressable>
         )}
         {settled && (
-          <View style={styles.notice}>
+          <View style={[styles.notice, { backgroundColor: theme.surface }]}>
             <Text style={styles.score}>{points} / {maxPoints}</Text>
             <Text style={styles.question}>{correct} of {pickCount} predictions correct</Text>
             <Text style={styles.secondary}>Practice points only. Rankings have not changed.</Text>
           </View>
         )}
         {state.stage !== 'picking' && (
-          <Pressable accessibilityRole="button" onPress={sharePicks} style={styles.shareButton}>
+          <Pressable accessibilityRole="button" onPress={sharePicks} style={[styles.shareButton, { backgroundColor: theme.surface }]}>
             <Text style={styles.buttonText}>{settled ? 'Share your result →' : 'Share your picks →'}</Text>
           </Pressable>
         )}

@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
+import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Link } from 'expo-router';
+import { fanSections } from '@/constants/fan-sections';
 import BostonMap from '@/components/boston-map';
 
 type Coordinate = { latitude: number; longitude: number };
@@ -50,8 +52,9 @@ export default function WhereInBostonScreen() {
   }
   return (
     <SafeAreaView style={styles.screen}>
+      <StatusBar style="light" />
       <ScrollView contentContainerStyle={styles.content}>
-        <Link href={{ pathname: '/fan-challenges', params: { sport: 'boston' } }} style={styles.back}>← Boston challenges</Link>
+        <Link href={{ pathname: '/fan-challenges', params: { sport: 'boston' } }} dismissTo style={styles.back}>← Boston challenges</Link>
         <Text style={styles.title}>Where in Boston?</Text>
         <Text style={styles.muted}>PRACTICE · 3 LOCATIONS</Text>
         {finished ? (
@@ -99,7 +102,7 @@ export default function WhereInBostonScreen() {
   );
 }
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#101218' },
+  screen: { flex: 1, backgroundColor: fanSections[3].gameBackground },
   content: { padding: 20, paddingBottom: 32, gap: 18, width: '100%', maxWidth: 600, alignSelf: 'center' },
   back: { color: '#85B0FF', fontSize: 16, paddingVertical: 8 },
   title: { color: '#FFFFFF', fontSize: 32, fontWeight: '800' },
@@ -108,8 +111,8 @@ const styles = StyleSheet.create({
   muted: { color: '#BDC3D0', fontSize: 14, lineHeight: 22 },
   score: { color: '#FFD477', fontSize: 40, fontWeight: '900' },
   map: { borderRadius: 18, overflow: 'hidden' },
-  card: { backgroundColor: '#1D2230', padding: 16, borderRadius: 14, gap: 8 },
-  button: { backgroundColor: '#2357C7', borderRadius: 14, padding: 18, minHeight: 56, alignItems: 'center' },
+  card: { backgroundColor: fanSections[3].surface, padding: 16, borderRadius: 14, gap: 8 },
+  button: { backgroundColor: fanSections[3].surface, borderRadius: 14, padding: 18, minHeight: 56, alignItems: 'center' },
   buttonText: { color: '#FFFFFF', fontSize: 17, fontWeight: '700' },
   disabled: { opacity: 0.45 },
 });

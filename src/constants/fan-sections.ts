@@ -1,9 +1,8 @@
 export const fanSections = [
-  { id: 'bruins', name: 'Bruins', sport: 'Hockey', color: '#FFD166', description: 'Goals, assists, and Black-and-Gold knowledge.' },
-  { id: 'celtics', name: 'Celtics', sport: 'Basketball', color: '#74D5A1', description: 'Championship rosters, stat lines, and Celtics history.' },
-  { id: 'red-sox', name: 'Red Sox', sport: 'Baseball', color: '#FF8B95', description: 'Runs, records, and generations of Sox history.' },
-  { id: 'patriots', name: 'Patriots', sport: 'Football', color: '#92B6FF', description: 'Spreads, memorable seasons, and Patriots knowledge.' },
-  { id: 'boston', name: 'Boston', sport: 'City challenges', color: '#8CDED7', description: 'Neighborhoods, landmarks, and life around Boston.' },
+  { id: 'celtics', name: 'Celtics', color: '#087443', ink: '#FFFFFF', gameBackground: '#073B29', surface: '#10513A' },
+  { id: 'patriots', name: 'Patriots', color: '#153D80', ink: '#FFFFFF', gameBackground: '#102B57', surface: '#1D4075' },
+  { id: 'bruins', name: 'Bruins', color: '#FFCA38', ink: '#201900', gameBackground: '#382900', surface: '#554000' },
+  { id: 'boston', name: 'Boston', color: '#713E42', ink: '#FFFFFF', gameBackground: '#47282D', surface: '#60373D' },
 ] as const;
 
 export type FanSection = (typeof fanSections)[number];

@@ -15,8 +15,10 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { fanSections, getFanSection } from '@/constants/fan-sections';
 import { puzzles } from '@/constants/wicked-smaht-puzzles';
 import { supabase } from '@/lib/supabase';
 
@@ -75,7 +77,7 @@ export default function WickedSmahtScreen() {
   const { sport } = useLocalSearchParams<{ sport?: string }>();
   const id = sport ?? 'celtics';
   const puzzle = typeof id === 'string' && Object.prototype.hasOwnProperty.call(puzzles, id) ? puzzles[id] : undefined;
-  if (!puzzle) return <Redirect href="/" />;
+  if (!puzzle || !getFanSection(id)) return <Redirect href="/" />;
   return <DailyTeamPuzzle key={id} sport={id} puzzle={puzzle} />;
 }
 
@@ -177,6 +179,7 @@ function puzzleFromRow(row: { prompt: string; roster_data: unknown }, original: 
 }
 
 function DailyTeamPuzzle({ sport, puzzle }: { sport: string; puzzle: Puzzle }) {
+  const theme = getFanSection(sport) ?? fanSections[0];
   const date = bostonDate(new Date());
   const [load, setLoad] = useState<DailyLoad>({ status: 'loading' });
   const [retry, setRetry] = useState(0);
@@ -220,15 +223,16 @@ function DailyTeamPuzzle({ sport, puzzle }: { sport: string; puzzle: Puzzle }) {
   }
 
   return (
-    <SafeAreaView style={styles.screen}>
+    <SafeAreaView style={[styles.screen, { backgroundColor: theme.gameBackground }]}>
+      <StatusBar style="light" />
       <ScrollView contentContainerStyle={styles.content}>
-        <Link href={{ pathname: '/fan-challenges', params: { sport } }} style={styles.link}>← {puzzle.name} challenges</Link>
+        <Link href={{ pathname: '/fan-challenges', params: { sport } }} dismissTo style={styles.link}>← {puzzle.name} challenges</Link>
         <Text style={styles.title}>Wicked Smaht</Text>
         <Text style={styles.secondary}>
           {load.status === 'unavailable' ? load.message : `Loading today’s ${puzzle.name} puzzle…`}
         </Text>
         {load.status === 'unavailable' && (
-          <Pressable style={styles.button} accessibilityRole="button" onPress={() => {
+          <Pressable style={[styles.button, { backgroundColor: theme.surface }]} accessibilityRole="button" onPress={() => {
             setLoad({ status: 'loading' });
             setRetry((value) => value + 1);
           }}>
@@ -241,6 +245,7 @@ function DailyTeamPuzzle({ sport, puzzle }: { sport: string; puzzle: Puzzle }) {
 }
 
 function RosterPuzzle({ sport, puzzle, dailyDate }: { sport: string; puzzle: Puzzle; dailyDate?: string }) {
+  const theme = getFanSection(sport) ?? fanSections[0];
   const storageKey = dailyDate ? `wicked-smaht:${sport}:${dailyDate}:${puzzle.year}` : undefined;
   const [game, dispatch] = useReducer(
     (state: GameState, action: GameAction) => gameReducer(state, action, puzzle),
@@ -295,12 +300,13 @@ function RosterPuzzle({ sport, puzzle, dailyDate }: { sport: string; puzzle: Puz
   }
 
   return (
-    <SafeAreaView style={styles.screen}>
+    <SafeAreaView style={[styles.screen, { backgroundColor: theme.gameBackground }]}>
+      <StatusBar style="light" />
       <ScrollView contentContainerStyle={styles.content}>
-        <Link href={{ pathname: '/fan-challenges', params: { sport } }} style={styles.link}>← {puzzle.name} challenges</Link>
+        <Link href={{ pathname: '/fan-challenges', params: { sport } }} dismissTo style={styles.link}>← {puzzle.name} challenges</Link>
         <Text style={styles.label}>{dailyDate ? `${puzzle.name.toUpperCase()} DAILY PUZZLE · ${dailyDate}` : 'BOSTON SPORTS · PRACTICE'}</Text>
         <Text style={styles.title}>Wicked Smaht</Text>
-        <View style={styles.card}>
+        <View style={[styles.card, { backgroundColor: theme.surface }]}>
           <Text style={styles.question}>
             {puzzle.prompt}
           </Text>
@@ -323,7 +329,7 @@ function RosterPuzzle({ sport, puzzle, dailyDate }: { sport: string; puzzle: Puz
               accessibilityRole="button"
               accessibilityLabel={selected ? `Selected ${selected}. Open player key to change.` : `Open ${puzzle.name} player key`}
               onPress={openPicker}
-              style={styles.selector}
+              style={[styles.selector, { backgroundColor: theme.surface }]}
             >
               <Text style={styles.selectorLabel}>CELTICS ALL-TIME PLAYER KEY</Text>
               <Text style={styles.selectorValue}>{selected ?? 'Tap to search or browse players'} ▾</Text>
@@ -336,7 +342,7 @@ function RosterPuzzle({ sport, puzzle, dailyDate }: { sport: string; puzzle: Puz
               accessibilityState={{ disabled: !selected }}
               disabled={!selected}
               onPress={submitAnswer}
-              style={[styles.button, !selected && styles.disabled]}
+              style={[styles.button, { backgroundColor: theme.surface }, !selected && styles.disabled]}
             >
               <Text style={styles.buttonText}>Submit player</Text>
             </Pressable>
@@ -344,12 +350,12 @@ function RosterPuzzle({ sport, puzzle, dailyDate }: { sport: string; puzzle: Puz
         )}
         <Text style={styles.feedback} accessibilityLiveRegion="polite">{game.message}</Text>
         {Array.from({ length: GOAL }, (_, index) => (
-          <View key={index} style={styles.slot}>
+          <View key={index} style={[styles.slot, { backgroundColor: theme.surface }]}>
             <Text style={styles.slotText}>{index + 1}. {game.found[index] ?? '—'}</Text>
           </View>
         ))}
         {game.wrong.length > 0 && (
-          <View style={styles.card}>
+          <View style={[styles.card, { backgroundColor: theme.surface }]}>
             <Text style={styles.question}>Wrong guesses · {game.wrong.length}/5</Text>
             {game.wrong.map((name) => <Text key={name} style={styles.wrongText}>✕ {name}</Text>)}
           </View>
@@ -360,11 +366,11 @@ function RosterPuzzle({ sport, puzzle, dailyDate }: { sport: string; puzzle: Puz
               {game.found.length === GOAL ? 'All 10 found!' : 'Challenge over'}
             </Text>
             <Text style={styles.score}>Final score: {points} / 1000</Text>
-            <Pressable accessibilityRole="button" style={styles.button} onPress={shareScore}>
+            <Pressable accessibilityRole="button" style={[styles.button, { backgroundColor: theme.surface }]} onPress={shareScore}>
               <Text style={styles.buttonText}>Share your score →</Text>
             </Pressable>
             {shareError ? <Text style={styles.feedback}>{shareError}</Text> : null}
-            <View style={styles.card}>
+            <View style={[styles.card, { backgroundColor: theme.surface }]}>
               <Text style={styles.question}>All qualifying answers</Text>
               <Text style={styles.secondary}>There are {puzzle.answers.length} qualifying players; you needed any 10.</Text>
               {puzzle.answers.map((name) => (
@@ -403,9 +409,10 @@ function RosterPuzzle({ sport, puzzle, dailyDate }: { sport: string; puzzle: Puz
         animationType="slide"
         onRequestClose={() => setPickerOpen(false)}
       >
-        <SafeAreaView style={styles.screen}>
+        <SafeAreaView style={[styles.screen, { backgroundColor: theme.gameBackground }]}>
+      <StatusBar style="light" />
           <KeyboardAvoidingView
-            style={styles.screen}
+            style={[styles.screen, { backgroundColor: theme.gameBackground }]}
             behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           >
             <View style={styles.pickerHeader}>
@@ -424,7 +431,7 @@ function RosterPuzzle({ sport, puzzle, dailyDate }: { sport: string; puzzle: Puz
                 onChangeText={setQuery}
                 autoCorrect={false}
                 autoCapitalize="none"
-                style={styles.input}
+                style={[styles.input, { backgroundColor: theme.surface }]}
               />
               <Text style={styles.secondary}>{filtered.length} players shown · {puzzle.players.length} in key</Text>
             </View>
