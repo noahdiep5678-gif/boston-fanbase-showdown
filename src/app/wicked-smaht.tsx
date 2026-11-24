@@ -1,123 +1,65 @@
-import { useEffect, useReducer, useState } from 'react';
-import { Link, Redirect, useLocalSearchParams } from 'expo-router';
-import {
-  FlatList,
-  Keyboard,
-  KeyboardAvoidingView,
-  Linking,
-  Modal,
-  Platform,
-  Pressable,
-  ScrollView,
-  Share,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
-import { StatusBar } from 'expo-status-bar';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { Redirect, useLocalSearchParams } from 'expo-router';
+import { useEffect, useMemo, useReducer, useState } from 'react';
+import { Keyboard, Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { fanSections, getFanSection } from '@/constants/fan-sections';
-import { puzzles } from '@/constants/wicked-smaht-puzzles';
+import { getFanSection, type FanSection } from '@/constants/fan-sections';
+import { celtics2024Answers, puzzles } from '@/constants/wicked-smaht-puzzles';
+import { shareText } from '@/lib/share';
+import { bostonDate, formatCountdown, msUntilBostonMidnight } from '@/lib/dates';
+import { recordResult } from '@/lib/stats';
 import { supabase } from '@/lib/supabase';
+import { Button, Card, FadeIn, PressableScale, Row, Screen, Stat, Tag, useRevealOnFocus } from '@/ui/components';
+import { haptic } from '@/ui/haptics';
+import { palette, radius, space, type } from '@/ui/tokens';
 
 const GOAL = 10;
 const MAX_MISTAKES = 5;
+const SUGGESTIONS = 5;
+
+type Puzzle = NonNullable<(typeof puzzles)[string]>;
 
 function normalize(value: string) {
-  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  return value.normalize('NFD').replace(/[̀-ͯ]/g, '')
     .toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-
+/* --------------------------------------------------------------- game state */
 
 type GameState = {
   found: string[];
   wrong: string[];
+  /** Guess outcomes in the order they were made, for the share grid. */
+  order: ('hit' | 'miss')[];
   finished: boolean;
   message: string;
+  last?: 'hit' | 'miss' | 'repeat';
 };
 type GameAction = { type: 'guess'; player: string } | { type: 'finish' };
-const initialState: GameState = {
-  found: [], wrong: [], finished: false, message: '',
-};
+const initialState: GameState = { found: [], wrong: [], order: [], finished: false, message: '' };
 
-function gameReducer(state: GameState, action: GameAction, puzzle: NonNullable<(typeof puzzles)[string]>): GameState {
+function gameReducer(state: GameState, action: GameAction, puzzle: Puzzle): GameState {
   if (state.finished) return state;
   if (action.type === 'finish') {
-    return { ...state, finished: true, message: 'Challenge finished. Answers revealed below.' };
+    return { ...state, finished: true, message: 'Challenge finished. Answers revealed below.', last: undefined };
   }
   const player = puzzle.players.find((name) => normalize(name) === normalize(action.player));
   if (!player) return state;
   if ([...state.found, ...state.wrong].some((name) => normalize(name) === normalize(player))) {
-    return { ...state, message: 'Already tried. No attempt lost.' };
+    return { ...state, message: 'Already tried. No attempt lost.', last: 'repeat' };
   }
   if (puzzle.answers.some((answer) => normalize(answer) === normalize(player))) {
     const found = [...state.found, player];
     return {
-      ...state,
-      found,
+      ...state, found, order: [...state.order, 'hit'], last: 'hit',
       finished: found.length === GOAL,
       message: found.length === GOAL ? 'Wicked Smaht! All 10 found.' : `Correct — ${player}!`,
     };
   }
   const wrong = [...state.wrong, player];
   return {
-    ...state,
-    wrong,
+    ...state, wrong, order: [...state.order, 'miss'], last: 'miss',
     finished: wrong.length === MAX_MISTAKES,
-    message: wrong.length === MAX_MISTAKES
-      ? 'Five wrong answers. Challenge over.'
-      : `${player} was not on the ${puzzle.roster}.`,
-  };
-}
-
-export default function WickedSmahtScreen() {
-  const { sport } = useLocalSearchParams<{ sport?: string }>();
-  const id = sport ?? 'celtics';
-  const puzzle = typeof id === 'string' && Object.prototype.hasOwnProperty.call(puzzles, id) ? puzzles[id] : undefined;
-  if (!puzzle || !getFanSection(id)) return <Redirect href="/" />;
-  return <DailyTeamPuzzle key={id} sport={id} puzzle={puzzle} />;
-}
-
-type Puzzle = NonNullable<(typeof puzzles)[string]>;
-
-type DailyLoad =
-  | { status: 'loading' }
-  | { status: 'ready'; date: string; puzzle: Puzzle }
-  | { status: 'unavailable'; message: string };
-
-function bostonDate(now: Date) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(now);
-  const part = (type: string) => parts.find((entry) => entry.type === type)?.value;
-  return `${part('year')}-${part('month')}-${part('day')}`;
-}
-
-const celtics2024Answers = [
-  'Jayson Tatum', 'Jrue Holiday', 'Jaylen Brown', 'Kristaps Porziņģis',
-  'Derrick White', 'Payton Pritchard', 'Oshae Brissett', 'Drew Peterson',
-  'JD Davison', 'Xavier Tillman', 'Jordan Walsh', 'Sam Hauser',
-  'Luke Kornet', 'Al Horford', 'Jaden Springer', 'Svi Mykhailiuk',
-  'Neemias Queta',
-];
-
-function celtics2024Puzzle(original: Puzzle): Puzzle {
-  const players = new Map(original.players.map((name) => [normalize(name), name]));
-  for (const name of celtics2024Answers) players.set(normalize(name), name);
-  return {
-    ...original,
-    year: '2024',
-    roster: '2024 Celtics championship roster',
-    prompt: 'Name 10 players from the 2024 Celtics championship roster.',
-    answers: celtics2024Answers,
-    players: Array.from(players.values()).sort((a, b) => a.localeCompare(b)),
-    answerSource: 'https://en.wikipedia.org/wiki/2023%E2%80%9324_Boston_Celtics_season',
+    message: wrong.length === MAX_MISTAKES ? 'Five wrong answers. Challenge over.' : `${player} wasn’t on the ${puzzle.roster}.`,
   };
 }
 
@@ -133,10 +75,26 @@ function restoreResult(storageKey: string | undefined, puzzle: Puzzle): GameStat
       if (typeof player !== 'string') return initialState;
       game = gameReducer(game, { type: 'guess', player }, puzzle);
     }
-    return { ...game, finished: true, message: 'You completed this daily puzzle.' };
+    return { ...game, finished: true, message: 'You completed today’s puzzle.', last: undefined };
   } catch {
     return initialState;
   }
+}
+
+/* ------------------------------------------------------------ daily loading */
+
+function celtics2024Puzzle(original: Puzzle): Puzzle {
+  const players = new Map(original.players.map((name) => [normalize(name), name]));
+  for (const name of celtics2024Answers) players.set(normalize(name), name);
+  return {
+    ...original,
+    year: '2024',
+    roster: '2024 Celtics championship roster',
+    prompt: 'Name 10 players from the 2024 Celtics championship roster.',
+    answers: celtics2024Answers,
+    players: Array.from(players.values()).sort((a, b) => a.localeCompare(b)),
+    answerSource: 'https://en.wikipedia.org/wiki/2023%E2%80%9324_Boston_Celtics_season',
+  };
 }
 
 function puzzleFromRow(row: { prompt: string; roster_data: unknown }, original: Puzzle): Puzzle | undefined {
@@ -178,11 +136,25 @@ function puzzleFromRow(row: { prompt: string; roster_data: unknown }, original: 
   };
 }
 
-function DailyTeamPuzzle({ sport, puzzle }: { sport: string; puzzle: Puzzle }) {
-  const theme = getFanSection(sport) ?? fanSections[0];
-  const date = bostonDate(new Date());
+type DailyLoad =
+  | { status: 'loading' }
+  | { status: 'ready'; date: string; puzzle: Puzzle }
+  | { status: 'unavailable'; message: string; canRetry: boolean };
+
+export default function WickedSmahtScreen() {
+  const { sport } = useLocalSearchParams<{ sport?: string }>();
+  const id = sport ?? 'celtics';
+  const puzzle = typeof id === 'string' && Object.prototype.hasOwnProperty.call(puzzles, id) ? puzzles[id] : undefined;
+  const section = getFanSection(id);
+  if (!puzzle || !section) return <Redirect href="/" />;
+  return <DailyTeamPuzzle key={id} section={section} puzzle={puzzle} />;
+}
+
+function DailyTeamPuzzle({ section, puzzle }: { section: FanSection; puzzle: Puzzle }) {
+  const date = bostonDate();
   const [load, setLoad] = useState<DailyLoad>({ status: 'loading' });
   const [retry, setRetry] = useState(0);
+  const [practice, setPractice] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -191,328 +163,328 @@ function DailyTeamPuzzle({ sport, puzzle }: { sport: string; puzzle: Puzzle }) {
         const { data, error } = await supabase
           .from('daily_puzzles')
           .select('prompt, roster_data')
-          .eq('team', sport)
+          .eq('team', section.id)
           .eq('puzzle_date', date)
           .maybeSingle();
         if (!active) return;
         if (error) {
           console.warn('Daily team puzzle:', error.message);
-          setLoad({ status: 'unavailable', message: 'Could not load today’s puzzle. Try again.' });
+          setLoad({ status: 'unavailable', message: 'Couldn’t reach today’s puzzle.', canRetry: true });
         } else if (!data) {
-          setLoad({ status: 'unavailable', message: `There’s no ${puzzle.name} puzzle scheduled for today.` });
+          setLoad({ status: 'unavailable', message: `No ${puzzle.name} daily puzzle is scheduled for today.`, canRetry: false });
         } else {
-          const selectedPuzzle = puzzleFromRow(data, puzzle);
-          if (selectedPuzzle) {
-            setLoad({ status: 'ready', date, puzzle: selectedPuzzle });
-          } else {
-            setLoad({ status: 'unavailable', message: 'Today’s puzzle is unavailable.' });
-          }
+          const selected = puzzleFromRow(data, puzzle);
+          setLoad(selected
+            ? { status: 'ready', date, puzzle: selected }
+            : { status: 'unavailable', message: 'Today’s puzzle is unavailable.', canRetry: false });
         }
       } catch (error) {
         if (!active) return;
         console.warn('Daily team puzzle:', error);
-        setLoad({ status: 'unavailable', message: 'Could not load today’s puzzle. Try again.' });
+        setLoad({ status: 'unavailable', message: 'Couldn’t reach today’s puzzle.', canRetry: true });
       }
     }
     void fetchPuzzle();
     return () => { active = false; };
-  }, [date, puzzle, retry, sport]);
+  }, [date, puzzle, retry, section.id]);
 
   if (load.status === 'ready' && load.date === date) {
-    return <RosterPuzzle key={`${date}:${load.puzzle.year}`} sport={sport} puzzle={load.puzzle} dailyDate={date} />;
+    return <RosterPuzzle key={`${date}:${load.puzzle.year}`} section={section} puzzle={load.puzzle} dailyDate={date} />;
+  }
+  if (practice) {
+    return <RosterPuzzle key="practice" section={section} puzzle={puzzle} />;
   }
 
   return (
-    <SafeAreaView style={[styles.screen, { backgroundColor: theme.gameBackground }]}>
-      <StatusBar style="light" />
-      <ScrollView contentContainerStyle={styles.content}>
-        <Link href={{ pathname: '/fan-challenges', params: { sport } }} dismissTo style={styles.link}>← {puzzle.name} challenges</Link>
-        <Text style={styles.title}>Wicked Smaht</Text>
-        <Text style={styles.secondary}>
-          {load.status === 'unavailable' ? load.message : `Loading today’s ${puzzle.name} puzzle…`}
-        </Text>
-        {load.status === 'unavailable' && (
-          <Pressable style={[styles.button, { backgroundColor: theme.surface }]} accessibilityRole="button" onPress={() => {
-            setLoad({ status: 'loading' });
-            setRetry((value) => value + 1);
-          }}>
-            <Text style={styles.buttonText}>Try again</Text>
-          </Pressable>
-        )}
-      </ScrollView>
-    </SafeAreaView>
+    <Screen section={section} back={{ pathname: '/fan-challenges', params: { sport: section.id } }}
+      backLabel={`${section.name} challenges`} eyebrow={`${section.name} · Daily`} title="Wicked Smaht">
+      {load.status !== 'unavailable' ? (
+        <Card><Text style={type.muted}>Loading today’s {puzzle.name} puzzle…</Text></Card>
+      ) : (
+        <FadeIn style={styles.stack}>
+          <Card>
+            <Text style={type.heading}>{load.message}</Text>
+            <Text style={type.muted}>
+              Warm up with a practice round instead: {puzzle.prompt.replace(/^Name 10/, 'name 10')} Practice doesn’t count toward your streak.
+            </Text>
+          </Card>
+          <Button label="Play practice round" onPress={() => setPractice(true)} />
+          {load.canRetry && (
+            <Button label="Try again" variant="secondary" onPress={() => { setLoad({ status: 'loading' }); setRetry((v) => v + 1); }} />
+          )}
+        </FadeIn>
+      )}
+    </Screen>
   );
 }
 
-function RosterPuzzle({ sport, puzzle, dailyDate }: { sport: string; puzzle: Puzzle; dailyDate?: string }) {
-  const theme = getFanSection(sport) ?? fanSections[0];
-  const storageKey = dailyDate ? `wicked-smaht:${sport}:${dailyDate}:${puzzle.year}` : undefined;
+/* ------------------------------------------------------------------ the game */
+
+function useCountdown(active: boolean) {
+  const [ms, setMs] = useState(() => msUntilBostonMidnight());
+  useEffect(() => {
+    if (!active) return;
+    const timer = setInterval(() => setMs(msUntilBostonMidnight()), 1000);
+    return () => clearInterval(timer);
+  }, [active]);
+  return ms;
+}
+
+function RosterPuzzle({ section, puzzle, dailyDate }: { section: FanSection; puzzle: Puzzle; dailyDate?: string }) {
+  const storageKey = dailyDate ? `wicked-smaht:${section.id}:${dailyDate}:${puzzle.year}` : undefined;
   const [game, dispatch] = useReducer(
     (state: GameState, action: GameAction) => gameReducer(state, action, puzzle),
     storageKey,
-    (key) => restoreResult(key, puzzle)
+    (key) => restoreResult(key, puzzle),
   );
+  const [query, setQuery] = useState('');
+  const [selected, setSelected] = useState<string | null>(null);
+  const [shareError, setShareError] = useState('');
+  const [searchRef, revealSearch] = useRevealOnFocus();
+  const countdown = useCountdown(game.finished && !!dailyDate);
+  const tried = useMemo(() => new Set([...game.found, ...game.wrong].map(normalize)), [game.found, game.wrong]);
+  const points = game.found.length * 100;
+  const remaining = MAX_MISTAKES - game.wrong.length;
+  const accent = section.accent;
+
+  const suggestions = useMemo(() => {
+    const q = normalize(query);
+    if (!q) return [];
+    const words = (name: string) => name.split(/[\s.-]+/).map(normalize);
+    const starts = puzzle.players.filter((name) => words(name).some((word) => word.startsWith(q)));
+    const contains = puzzle.players.filter((name) => !starts.includes(name) && normalize(name).includes(q));
+    return [...starts, ...contains].slice(0, SUGGESTIONS);
+  }, [puzzle.players, query]);
+
   useEffect(() => {
     if (!storageKey || !game.finished) return;
     try {
-      localStorage.setItem(storageKey, JSON.stringify([...game.found, ...game.wrong]));
+      // Saved in guess order so the share grid restores faithfully.
+      const ordered: string[] = [];
+      let hit = 0;
+      let miss = 0;
+      for (const outcome of game.order) ordered.push(outcome === 'hit' ? game.found[hit++] : game.wrong[miss++]);
+      localStorage.setItem(storageKey, JSON.stringify(ordered));
     } catch (error) {
       console.warn('Could not save daily result:', error);
     }
   }, [storageKey, game]);
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [query, setQuery] = useState('');
-  const [selected, setSelected] = useState<string | null>(null);
-  const [shareError, setShareError] = useState('');
-  const filtered = puzzle.players.filter((name) => normalize(name).includes(normalize(query)));
-  const tried = new Set([...game.found, ...game.wrong].map(normalize));
-  const points = game.found.length * 100;
-  const remaining = MAX_MISTAKES - game.wrong.length;
 
-  function openPicker() {
-    if (game.finished) return;
-    setQuery('');
-    setPickerOpen(true);
-  }
+  useEffect(() => {
+    if (!game.finished) return;
+    recordResult({
+      id: dailyDate ? `wicked-smaht:${section.id}:${dailyDate}` : `wicked-smaht:${section.id}:practice:${Date.now()}`,
+      game: 'wicked-smaht', section: section.id, date: dailyDate,
+      score: points, max: GOAL * 100, practice: !dailyDate,
+      summary: `${game.found.length}/${GOAL} players · ${game.wrong.length} misses`,
+    });
+  }, [dailyDate, game.finished, game.found.length, game.wrong.length, points, section.id]);
 
-  function choosePlayer(name: string) {
+  function choose(name: string) {
     if (game.finished || tried.has(normalize(name))) return;
+    haptic.select();
     setSelected(name);
-    setPickerOpen(false);
+    setQuery('');
     Keyboard.dismiss();
   }
 
-  function submitAnswer() {
+  function submit() {
     if (!selected || game.finished) return;
+    const isHit = puzzle.answers.some((answer) => normalize(answer) === normalize(selected));
+    if (isHit) haptic.success(); else haptic.error();
     dispatch({ type: 'guess', player: selected });
     setSelected(null);
   }
 
+  const grid = game.order.map((outcome) => outcome === 'hit' ? '🟩' : '🟥').join('');
+
   async function shareScore() {
     try {
       setShareError('');
-      await Share.share({
-        message: `Wicked Smaht · ${puzzle.name} ${puzzle.year}\n${game.found.length}/10 players · ${points}/1000 points\n${game.wrong.length}/5 mistakes\nThink you know Boston sports better? Boston sports challenges.`,
-      });
+      await shareText(`Stadium Pulse · Wicked Smaht\n${puzzle.name} ${puzzle.year}${dailyDate ? ` · ${dailyDate}` : ' · practice'}\n${game.found.length}/10 ${grid}\nThink you know Boston sports better?`);
     } catch {
       setShareError('Sharing could not open. Please try again.');
     }
   }
 
   return (
-    <SafeAreaView style={[styles.screen, { backgroundColor: theme.gameBackground }]}>
-      <StatusBar style="light" />
-      <ScrollView contentContainerStyle={styles.content}>
-        <Link href={{ pathname: '/fan-challenges', params: { sport } }} dismissTo style={styles.link}>← {puzzle.name} challenges</Link>
-        <Text style={styles.label}>{dailyDate ? `${puzzle.name.toUpperCase()} DAILY PUZZLE · ${dailyDate}` : 'BOSTON SPORTS · PRACTICE'}</Text>
-        <Text style={styles.title}>Wicked Smaht</Text>
-        <View style={[styles.card, { backgroundColor: theme.surface }]}>
-          <Text style={styles.question}>
-            {puzzle.prompt}
-          </Text>
-          <Text style={styles.secondary}>
-            Pick from the {puzzle.name} player key. Any 10 correct players count.
-            Five wrong answers end the challenge.
-          </Text>
+    <Screen
+      section={section}
+      back={{ pathname: '/fan-challenges', params: { sport: section.id } }}
+      backLabel={`${section.name} challenges`}
+      eyebrow={dailyDate ? `${section.name} · Daily · ${dailyDate}` : `${section.name} · Practice`}
+      title="Wicked Smaht"
+      right={<Tag label={`${points} pts`} tone="accent" />}
+    >
+      <Card>
+        <Text style={type.heading}>{puzzle.prompt}</Text>
+        <Text style={type.small}>Any 10 correct players win. Five misses and you’re out.</Text>
+      </Card>
+
+      <Row style={styles.between}>
+        <View style={styles.lives} accessible accessibilityLabel={`${remaining} of ${MAX_MISTAKES} lives remaining`}>
+          {Array.from({ length: MAX_MISTAKES }, (_, i) => (
+            <View key={i} style={[styles.life, i < remaining ? { backgroundColor: palette.danger } : styles.lifeLost]} />
+          ))}
         </View>
-        <Text style={styles.score}>{game.found.length} / 10 · {points} points</Text>
-        <Text style={[styles.lives, remaining <= 1 && styles.warning]}>
-          {remaining} of 5 attempts remaining
-        </Text>
-        <Text style={styles.hearts} accessibilityLabel={`${remaining} attempts remaining`}>
-          {'♥ '.repeat(remaining)}{'♡ '.repeat(game.wrong.length)}
-        </Text>
+        <Text style={[type.eyebrow, { color: palette.text }]}>{game.found.length} / {GOAL} found</Text>
+      </Row>
 
-        {!game.finished && (
-          <>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={selected ? `Selected ${selected}. Open player key to change.` : `Open ${puzzle.name} player key`}
-              onPress={openPicker}
-              style={[styles.selector, { backgroundColor: theme.surface }]}
-            >
-              <Text style={styles.selectorLabel}>CELTICS ALL-TIME PLAYER KEY</Text>
-              <Text style={styles.selectorValue}>{selected ?? 'Tap to search or browse players'} ▾</Text>
-            </Pressable>
-            <Text style={styles.secondary}>
-              Choosing a name does not use an attempt. Submit when ready.
-            </Text>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityState={{ disabled: !selected }}
-              disabled={!selected}
-              onPress={submitAnswer}
-              style={[styles.button, { backgroundColor: theme.surface }, !selected && styles.disabled]}
-            >
-              <Text style={styles.buttonText}>Submit player</Text>
-            </Pressable>
-          </>
-        )}
-        <Text style={styles.feedback} accessibilityLiveRegion="polite">{game.message}</Text>
-        {Array.from({ length: GOAL }, (_, index) => (
-          <View key={index} style={[styles.slot, { backgroundColor: theme.surface }]}>
-            <Text style={styles.slotText}>{index + 1}. {game.found[index] ?? '—'}</Text>
-          </View>
-        ))}
-        {game.wrong.length > 0 && (
-          <View style={[styles.card, { backgroundColor: theme.surface }]}>
-            <Text style={styles.question}>Wrong guesses · {game.wrong.length}/5</Text>
-            {game.wrong.map((name) => <Text key={name} style={styles.wrongText}>✕ {name}</Text>)}
-          </View>
-        )}
-        {game.finished ? (
-          <>
-            <Text style={styles.question}>
-              {game.found.length === GOAL ? 'All 10 found!' : 'Challenge over'}
-            </Text>
-            <Text style={styles.score}>Final score: {points} / 1000</Text>
-            <Pressable accessibilityRole="button" style={[styles.button, { backgroundColor: theme.surface }]} onPress={shareScore}>
-              <Text style={styles.buttonText}>Share your score →</Text>
-            </Pressable>
-            {shareError ? <Text style={styles.feedback}>{shareError}</Text> : null}
-            <View style={[styles.card, { backgroundColor: theme.surface }]}>
-              <Text style={styles.question}>All qualifying answers</Text>
-              <Text style={styles.secondary}>There are {puzzle.answers.length} qualifying players; you needed any 10.</Text>
-              {puzzle.answers.map((name) => (
-                <Text key={name} style={styles.secondary}>
-                  {game.found.some((found) => normalize(found) === normalize(name)) ? '✓ ' : '• '}{name}
-                </Text>
-              ))}
-              <Pressable accessibilityRole="link" onPress={() => {
-                void Linking.openURL(puzzle.answerSource).catch(() => {});
-              }}>
-                <Text style={styles.link}>Answer roster source</Text>
-              </Pressable>
-              <Pressable accessibilityRole="link" onPress={() => {
-                void Linking.openURL(puzzle.playerSource).catch(() => {});
-              }}>
-                <Text style={styles.link}>Player key source</Text>
-              </Pressable>
+      <View style={styles.board}>
+        {Array.from({ length: GOAL }, (_, index) => {
+          const name = game.found[index];
+          return (
+            <View key={index} style={[styles.slot, name ? { borderColor: accent, backgroundColor: palette.overlayStrong } : null]}>
+              <Text style={[styles.slotNumber, name ? { color: accent } : null]}>{index + 1}</Text>
+              <Text numberOfLines={1} style={[styles.slotText, !name && { color: palette.textFaint }]}>{name ?? '—'}</Text>
             </View>
-          </>
-        ) : (
-          <Pressable
-            accessibilityRole="button"
-            style={styles.finishButton}
-            onPress={() => dispatch({ type: 'finish' })}
-          >
-            <Text style={styles.link}>Finish and reveal answers</Text>
-          </Pressable>
-        )}
-        <Text style={styles.secondary}>
-          {dailyDate ? 'Completed rounds are saved on this device.' : 'Practice scores reset when the game restarts.'}
-        </Text>
-      </ScrollView>
+          );
+        })}
+      </View>
 
-      <Modal
-        visible={pickerOpen && !game.finished}
-        animationType="slide"
-        onRequestClose={() => setPickerOpen(false)}
-      >
-        <SafeAreaView style={[styles.screen, { backgroundColor: theme.gameBackground }]}>
-      <StatusBar style="light" />
-          <KeyboardAvoidingView
-            style={[styles.screen, { backgroundColor: theme.gameBackground }]}
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          >
-            <View style={styles.pickerHeader}>
-              <Pressable accessibilityRole="button" onPress={() => setPickerOpen(false)} style={styles.closeButton}>
-                <Text style={styles.link}>Close player key</Text>
+      {!!game.message && (
+        <Text accessibilityLiveRegion="polite" style={[styles.feedback,
+          game.last === 'hit' && { color: palette.success },
+          game.last === 'miss' && { color: palette.danger }]}>
+          {game.message}
+        </Text>
+      )}
+
+      {!game.finished && (
+        <View ref={searchRef} collapsable={false} style={styles.stack}>
+          {selected ? (
+            <Card tone="raised" style={styles.selectedCard}>
+              <View style={styles.flex}>
+                <Text style={type.eyebrow}>Your guess</Text>
+                <Text style={type.title}>{selected}</Text>
+              </View>
+              <Pressable accessibilityRole="button" accessibilityLabel="Clear selection" hitSlop={10} onPress={() => setSelected(null)}>
+                <Text style={[type.heading, { color: palette.textMuted }]}>✕</Text>
               </Pressable>
-              <Text style={styles.question}>{puzzle.name} player key</Text>
-              <Text style={styles.secondary}>
-                Names only — no seasons or clues. Tap a player to select.
-              </Text>
-              <TextInput
-                accessibilityLabel={`Search ${puzzle.name} player key`}
-                placeholder="Search first or last name…"
-                placeholderTextColor="#9CA7BB"
-                value={query}
-                onChangeText={setQuery}
-                autoCorrect={false}
-                autoCapitalize="none"
-                style={[styles.input, { backgroundColor: theme.surface }]}
-              />
-              <Text style={styles.secondary}>{filtered.length} players shown · {puzzle.players.length} in key</Text>
-            </View>
-            <FlatList
-              style={styles.list}
-              data={filtered}
-              extraData={game}
-              keyExtractor={(name) => name}
-              keyboardShouldPersistTaps="handled"
-              keyboardDismissMode="on-drag"
-              initialNumToRender={20}
-              contentContainerStyle={styles.listContent}
-              ListEmptyComponent={<Text style={styles.secondary}>No matching player. Try another spelling.</Text>}
-              renderItem={({ item }) => {
-                const alreadyTried = tried.has(normalize(item));
-                const wasCorrect = game.found.some((name) => normalize(name) === normalize(item));
-                return (
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityState={{ disabled: alreadyTried }}
-                    disabled={alreadyTried}
-                    onPress={() => choosePlayer(item)}
-                    style={({ pressed }) => [styles.playerRow, alreadyTried && styles.disabled, pressed && styles.pressed]}
-                  >
-                    <Text style={styles.slotText}>{item}</Text>
-                    <Text style={styles.secondary}>
-                      {alreadyTried ? (wasCorrect ? '✓ Found' : '✕ Tried') : 'Select'}
-                    </Text>
-                  </Pressable>
-                );
-              }}
-              ListFooterComponent={
-                <View style={styles.source}>
-                  <Text style={styles.secondary}>
-                    Player key: franchise roster snapshot.
-                    Future additions may need an update.
-                  </Text>
-                  <Text style={styles.secondary}>
-                    Source: Wikipedia contributors (CC BY-SA 4.0).
-                  </Text>
-                </View>
-              }
+            </Card>
+          ) : (
+            <TextInput
+              onFocus={revealSearch}
+              accessibilityLabel={`Search ${puzzle.name} players`}
+              placeholder={`Search ${puzzle.players.length.toLocaleString()} ${puzzle.name} players…`}
+              placeholderTextColor={palette.textFaint}
+              value={query}
+              onChangeText={setQuery}
+              autoCorrect={false}
+              autoCapitalize="words"
+              returnKeyType="search"
+              keyboardAppearance="dark"
+              onSubmitEditing={() => suggestions.length === 1 && choose(suggestions[0])}
+              style={[styles.input, { borderColor: query ? accent : palette.border }]}
             />
-          </KeyboardAvoidingView>
-        </SafeAreaView>
-      </Modal>
-    </SafeAreaView>
+          )}
+          {!selected && suggestions.length > 0 && (
+            <View style={styles.suggestions}>
+              {suggestions.map((name) => {
+                const used = tried.has(normalize(name));
+                const wasHit = game.found.some((found) => normalize(found) === normalize(name));
+                return (
+                  <PressableScale key={name} feedback={null} disabled={used} onPress={() => choose(name)}
+                    accessibilityRole="button" accessibilityState={{ disabled: used }}
+                    accessibilityLabel={used ? `${name}, already tried` : `Select ${name}`}
+                    style={[styles.suggestion, used && styles.used]}>
+                    <Text style={styles.suggestionText}>{name}</Text>
+                    <Text style={type.small}>{used ? (wasHit ? '✓ found' : '✕ tried') : 'Select'}</Text>
+                  </PressableScale>
+                );
+              })}
+            </View>
+          )}
+          {!selected && !!query && suggestions.length === 0 && (
+            <Text style={type.small}>No matching player. Try another spelling.</Text>
+          )}
+          <Button label={selected ? `Submit ${selected}` : 'Pick a player to guess'} disabled={!selected} onPress={submit} feedback={null} />
+          <Text style={type.small}>Picking a name is free — only submitting uses an attempt.</Text>
+        </View>
+      )}
+
+      {game.wrong.length > 0 && (
+        <View style={styles.misses}>
+          {game.wrong.map((name) => <Tag key={name} label={`✕ ${name}`} tone="danger" />)}
+        </View>
+      )}
+
+      {game.finished ? (
+        <FadeIn style={styles.stack}>
+          <Card tone={game.found.length === GOAL ? 'success' : 'raised'} style={styles.center}>
+            <Text style={type.eyebrow}>{game.found.length === GOAL ? 'All 10 found' : 'Challenge over'}</Text>
+            <Text style={styles.big}>{points}<Text style={styles.bigOf}>/1000</Text></Text>
+            {!!grid && <Text style={styles.grid}>{grid}</Text>}
+          </Card>
+          {dailyDate && (
+            <Row>
+              <Stat value={formatCountdown(countdown)} label="Next puzzle" />
+              <Stat value={`${game.wrong.length}/${MAX_MISTAKES}`} label="Misses" />
+            </Row>
+          )}
+          <Button label="Share your score" icon="↗" onPress={shareScore} />
+          {!!shareError && <Text style={type.small}>{shareError}</Text>}
+          <Card>
+            <Text style={type.heading}>Every qualifying answer</Text>
+            <Text style={type.small}>{puzzle.answers.length} players qualified — you needed any 10.</Text>
+            <View style={styles.misses}>
+              {puzzle.answers.map((name) => {
+                const hit = game.found.some((found) => normalize(found) === normalize(name));
+                return <Tag key={name} label={`${hit ? '✓ ' : ''}${name}`} tone={hit ? 'success' : 'neutral'} />;
+              })}
+            </View>
+            <Row gap={space.lg}>
+              <Pressable accessibilityRole="link" onPress={() => void Linking.openURL(puzzle.answerSource).catch(() => {})}>
+                <Text style={[type.small, { color: accent }]}>Roster source</Text>
+              </Pressable>
+              <Pressable accessibilityRole="link" onPress={() => void Linking.openURL(puzzle.playerSource).catch(() => {})}>
+                <Text style={[type.small, { color: accent }]}>Player key source</Text>
+              </Pressable>
+            </Row>
+            <Text style={type.small}>Player names adapted from Wikipedia contributors (CC BY-SA 4.0).</Text>
+          </Card>
+        </FadeIn>
+      ) : (
+        <Button label="Give up and reveal answers" variant="ghost" feedback="warning" onPress={() => dispatch({ type: 'finish' })} />
+      )}
+      <Text style={type.small}>
+        {dailyDate ? 'Your daily result is saved on this device.' : 'Practice round — not saved to your streak.'}
+      </Text>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#101218' },
-  content: { padding: 24, paddingBottom: 40, gap: 16, width: '100%', maxWidth: 600, alignSelf: 'center' },
-  link: { color: '#85B0FF', fontSize: 16, paddingVertical: 8 },
-  label: { color: '#FFD477', fontSize: 12, fontWeight: '800' },
-  title: { color: '#FFFFFF', fontSize: 36, fontWeight: '900' },
-  card: { backgroundColor: '#1D2230', padding: 20, borderRadius: 18, gap: 12 },
-  question: { color: '#FFFFFF', fontSize: 21, fontWeight: '700', lineHeight: 29 },
-  secondary: { color: '#BDC3D0', fontSize: 15, lineHeight: 23 },
-  score: { color: '#FFD477', fontSize: 22, fontWeight: '800' },
-  lives: { color: '#FFFFFF', fontSize: 17, fontWeight: '700' },
-  hearts: { color: '#FF7C8B', fontSize: 28 },
-  warning: { color: '#FF7C8B' },
-  selector: { backgroundColor: '#1D2230', borderColor: '#85B0FF', borderWidth: 1, padding: 18, borderRadius: 14, gap: 8 },
-  selectorLabel: { color: '#85B0FF', fontSize: 12, fontWeight: '800' },
-  selectorValue: { color: '#FFFFFF', fontSize: 18, lineHeight: 26 },
-  input: { color: '#FFFFFF', backgroundColor: '#1D2230', borderColor: '#62718B', borderWidth: 1, borderRadius: 14, padding: 16, fontSize: 18 },
-  button: { backgroundColor: '#2357C7', padding: 18, borderRadius: 14, alignItems: 'center' },
-  buttonText: { color: '#FFFFFF', fontSize: 17, fontWeight: '800' },
-  disabled: { opacity: 0.45 },
-  pressed: { opacity: 0.7 },
-  feedback: { color: '#E0E4ED', fontSize: 15, minHeight: 24 },
-  slot: { backgroundColor: '#1D2230', padding: 14, borderRadius: 12 },
-  slotText: { color: '#FFFFFF', fontSize: 17 },
-  wrongText: { color: '#FF9CAA', fontSize: 16 },
-  finishButton: { paddingVertical: 12, alignItems: 'center' },
-  pickerHeader: { padding: 20, gap: 12, width: '100%', maxWidth: 600, alignSelf: 'center' },
-  closeButton: { minHeight: 44, justifyContent: 'center', alignSelf: 'flex-end' },
-  list: { flex: 1, width: '100%', maxWidth: 600, alignSelf: 'center' },
-  listContent: { paddingHorizontal: 20, paddingBottom: 32 },
-  playerRow: { paddingVertical: 18, paddingHorizontal: 8, minHeight: 60, borderBottomColor: '#343C4E', borderBottomWidth: 1, gap: 4 },
-  source: { paddingVertical: 24, gap: 8 },
+  flex: { flex: 1 },
+  stack: { gap: space.md },
+  between: { justifyContent: 'space-between' },
+  center: { alignItems: 'center', paddingVertical: space.xl },
+  lives: { flexDirection: 'row', gap: 6 },
+  life: { width: 22, height: 8, borderRadius: 4 },
+  lifeLost: { backgroundColor: palette.overlayStrong },
+  board: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
+  slot: {
+    width: '48.5%', flexGrow: 1, minHeight: 48, borderRadius: radius.sm, borderWidth: 1, borderColor: palette.border,
+    backgroundColor: palette.overlay, flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingHorizontal: space.md,
+  },
+  slotNumber: { color: palette.textFaint, fontSize: 12, fontWeight: '800', width: 16 },
+  slotText: { color: palette.text, fontSize: 15, fontWeight: '600', flex: 1 },
+  feedback: { color: palette.textMuted, fontSize: 15, fontWeight: '600' },
+  input: {
+    color: palette.text, backgroundColor: palette.overlay, borderWidth: 1.5,
+    borderRadius: radius.md, paddingHorizontal: space.lg, paddingVertical: 15, fontSize: 17,
+  },
+  suggestions: { borderRadius: radius.md, overflow: 'hidden', borderWidth: 1, borderColor: palette.border, backgroundColor: palette.overlay },
+  suggestion: {
+    minHeight: 50, paddingHorizontal: space.lg, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.border,
+  },
+  suggestionText: { color: palette.text, fontSize: 16, fontWeight: '600' },
+  used: { opacity: 0.4 },
+  selectedCard: { flexDirection: 'row', alignItems: 'center' },
+  misses: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  big: { ...type.number, fontSize: 64, lineHeight: 70 },
+  bigOf: { fontSize: 26, color: palette.textMuted },
+  grid: { fontSize: 18, letterSpacing: 2, marginTop: space.sm },
 });
 

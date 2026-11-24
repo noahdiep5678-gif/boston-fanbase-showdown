@@ -1,20 +1,20 @@
 import { useEventListener } from 'expo';
 import { Image } from 'expo-image';
-import { useRouter } from 'expo-router';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ComponentRef } from 'react';
-import { AccessibilityInfo, Animated, Easing, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { AccessibilityInfo, Animated, Easing, Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { fanSections } from '@/constants/fan-sections';
-
-const logos = {
-  celtics: require('../../assets/images/teams/celtics.png'),
-  patriots: require('../../assets/images/teams/patriots.png'),
-  bruins: require('../../assets/images/teams/bruins.png'),
-};
+import { fanSections, pageGradients, teamLogos as logos } from '@/constants/fan-sections';
+import { DAILY_GAMES, dailyStreak, hasPlayed, useLedger } from '@/lib/stats';
+import { PressableScale } from '@/ui/components';
+import { DesktopHome } from '@/components/desktop-home';
+import { haptic } from '@/ui/haptics';
+import { useLayout } from '@/ui/layout';
 
 const montage = require('../../assets/videos/opening-montage.mp4');
 const titleBackground = '#10281D';
@@ -143,15 +143,67 @@ function StadiumTitle({ onFinish }: { onFinish: () => void }) {
   );
 }
 
+function CarouselStatus({ id, ink }: { id: (typeof fanSections)[number]['id']; ink: string }) {
+  const ledger = useLedger();
+  const dailies = DAILY_GAMES[id];
+  const done = dailies.filter((game) => hasPlayed(ledger, game, id)).length;
+  const streak = dailyStreak(ledger, dailies, id);
+  return (
+    <View style={[styles.statusPill, { borderColor: ink }]}>
+      <Text style={[styles.status, { color: ink }]}>
+        {done === dailies.length ? '✓ All dailies done' : `${done} of ${dailies.length} dailies done`}{streak > 1 ? `  ·  🔥 ${streak}` : ''}
+      </Text>
+    </View>
+  );
+}
+
+const INTRO_SEEN = 'stadium-pulse:intro-seen';
+
+/** On the web the intro plays once per browser session; `?intro=off` skips it entirely. */
+function shouldPlayIntro(param: string | undefined) {
+  if (param === 'off') return false;
+  if (Platform.OS !== 'web') return true;
+  try {
+    return globalThis.sessionStorage?.getItem(INTRO_SEEN) !== '1';
+  } catch {
+    return true;
+  }
+}
+
 export default function HomeScreen() {
   const router = useRouter();
-  const { width } = useWindowDimensions();
+  const { intro } = useLocalSearchParams<{ intro?: string }>();
+  const { width, height } = useWindowDimensions();
+  const layout = useLayout();
   const pages = useRef<ComponentRef<typeof ScrollView>>(null);
   const [active, setActive] = useState(0);
-  const [showIntro, setShowIntro] = useState(true);
+  const [showIntro, setShowIntro] = useState(() => shouldPlayIntro(intro));
   const [showTitle, setShowTitle] = useState(false);
   const finishMontage = useCallback(() => setShowTitle(true), []);
-  const finishIntro = useCallback(() => setShowIntro(false), []);
+  const finishIntro = useCallback(() => {
+    setShowIntro(false);
+    if (Platform.OS === 'web') {
+      try { globalThis.sessionStorage?.setItem(INTRO_SEEN, '1'); } catch {}
+    }
+  }, []);
+
+  if (layout.wide) {
+    return (
+      <View style={styles.screen}>
+        <DesktopHome />
+        {showIntro && (
+          <View style={StyleSheet.absoluteFill}>
+            {showTitle ? <StadiumTitle onFinish={finishIntro} /> : <OpeningMontage onFinish={finishMontage} />}
+            {!showTitle && (
+              <Pressable accessibilityRole="button" accessibilityLabel="Skip intro" onPress={finishMontage} style={[styles.skip, styles.skipDesktop]}>
+                <Text style={styles.skipText}>Skip intro</Text>
+              </Pressable>
+            )}
+          </View>
+        )}
+      </View>
+    );
+  }
 
   function goTo(index: number) {
     pages.current?.scrollTo({ x: width * index, animated: true });
@@ -170,8 +222,11 @@ export default function HomeScreen() {
         scrollEventThrottle={16}
         onScroll={({ nativeEvent }) => {
           if (width > 0) {
-            const index = Math.round(nativeEvent.contentOffset.x / width);
-            setActive(Math.max(0, Math.min(index, fanSections.length - 1)));
+            const index = Math.max(0, Math.min(Math.round(nativeEvent.contentOffset.x / width), fanSections.length - 1));
+            if (index !== active) {
+              haptic.select();
+              setActive(index);
+            }
           }
         }}
         accessibilityElementsHidden={showIntro}
@@ -182,69 +237,83 @@ export default function HomeScreen() {
           const label = isCity ? 'General Boston Trivia' : `Test Your ${section.name} Knowledge`;
 
           return (
-            <SafeAreaView
-              key={section.id}
-              style={[styles.page, { width, backgroundColor: section.color }]}
-              accessibilityElementsHidden={index !== active}
-              importantForAccessibility={index === active ? 'auto' : 'no-hide-descendants'}
-            >
-              <View style={styles.main}>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={label}
-                  onPress={() => router.push({ pathname: '/fan-challenges', params: { sport: section.id } })}
-                  style={({ pressed }) => [styles.open, pressed && styles.pressed]}
-                >
-                  {isCity
-                    ? <Text style={[styles.city, { color: section.ink }]}>BOSTON</Text>
-                    : <Image source={logos[section.id]} style={styles.logo} contentFit="contain" />}
-                  <Text style={[styles.caption, { color: section.ink }]}>{label}</Text>
-                </Pressable>
-                {index > 0 && (
-                  <Pressable
+            <View key={section.id} style={[styles.page, { width }, Platform.OS === 'web' && { height }]}>
+              <LinearGradient colors={pageGradients[section.id]} style={StyleSheet.absoluteFill} />
+              <SafeAreaView
+                style={styles.flex}
+                accessibilityElementsHidden={index !== active}
+                importantForAccessibility={index === active ? 'auto' : 'no-hide-descendants'}
+              >
+                <View style={styles.topBar}>
+                  <Text style={[styles.wordmark, { color: section.ink }]}>STADIUM PULSE</Text>
+                  <PressableScale
                     accessibilityRole="button"
-                    accessibilityLabel={`Previous: ${fanSections[index - 1].name}`}
-                    onPress={() => goTo(index - 1)}
-                    style={[styles.arrow, styles.left]}
+                    accessibilityLabel="Rankings and your stats"
+                    onPress={() => router.push('/rankings')}
+                    style={[styles.rankings, { borderColor: section.ink }]}
                   >
-                    <Text style={[styles.chevron, { color: section.ink }]}>{'\u2039'}</Text>
-                  </Pressable>
-                )}
-                {index < fanSections.length - 1 && (
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`Next: ${fanSections[index + 1].name}`}
-                    onPress={() => goTo(index + 1)}
-                    style={[styles.arrow, styles.right]}
-                  >
-                    <Text style={[styles.chevron, { color: section.ink }]}>{'\u203A'}</Text>
-                  </Pressable>
-                )}
-              </View>
-              <View style={styles.footer}>
-                <View style={styles.dots} accessible accessibilityLabel={`Page ${index + 1} of ${fanSections.length}`}>
-                  {fanSections.map((item, dot) => (
-                    <View key={item.id} style={[styles.dot, { backgroundColor: section.ink, opacity: dot === index ? 1 : 0.35 }]} />
-                  ))}
+                    {[8, 14, 11].map((height) => (
+                      <View key={height} style={[styles.bar, { backgroundColor: section.ink, height }]} />
+                    ))}
+                  </PressableScale>
                 </View>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Rankings"
-                  onPress={() => router.push('/rankings')}
-                  style={({ pressed }) => [styles.rankings, pressed && styles.pressed]}
-                >
-                  {[10, 20, 14].map((height) => (
-                    <View key={height} style={[styles.bar, { backgroundColor: section.ink, height }]} />
-                  ))}
-                </Pressable>
-              </View>
-            </SafeAreaView>
+                <View style={styles.main}>
+                  <PressableScale
+                    accessibilityRole="button"
+                    accessibilityLabel={label}
+                    pressedScale={0.94}
+                    onPress={() => router.push({ pathname: '/fan-challenges', params: { sport: section.id } })}
+                    style={styles.open}
+                  >
+                    {isCity
+                      ? <Text style={[styles.city, { color: section.ink }]}>BOSTON</Text>
+                      : <Image source={logos[section.id]} style={styles.logo} contentFit="contain" />}
+                    <Text style={[styles.caption, { color: section.ink }]}>{label}</Text>
+                    <CarouselStatus id={section.id} ink={section.ink} />
+                  </PressableScale>
+                  {index > 0 && (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Previous: ${fanSections[index - 1].name}`}
+                      onPress={() => goTo(index - 1)}
+                      style={[styles.arrow, styles.left]}
+                    >
+                      <Text style={[styles.chevron, { color: section.ink }]}>{'‹'}</Text>
+                    </Pressable>
+                  )}
+                  {index < fanSections.length - 1 && (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Next: ${fanSections[index + 1].name}`}
+                      onPress={() => goTo(index + 1)}
+                      style={[styles.arrow, styles.right]}
+                    >
+                      <Text style={[styles.chevron, { color: section.ink }]}>{'›'}</Text>
+                    </Pressable>
+                  )}
+                </View>
+                <View style={styles.footer}>
+                  <View style={styles.dots} accessible accessibilityLabel={`Page ${index + 1} of ${fanSections.length}`}>
+                    {fanSections.map((item, dot) => (
+                      <View key={item.id} style={[styles.dot, { backgroundColor: section.ink, opacity: dot === index ? 1 : 0.35 }, dot === index && styles.dotActive]} />
+                    ))}
+                  </View>
+                </View>
+              </SafeAreaView>
+            </View>
           );
         })}
       </ScrollView>
       {showIntro && (
         <View style={StyleSheet.absoluteFill}>
           {showTitle ? <StadiumTitle onFinish={finishIntro} /> : <OpeningMontage onFinish={finishMontage} />}
+          {!showTitle && (
+            <SafeAreaView style={styles.skipWrap} pointerEvents="box-none">
+              <Pressable accessibilityRole="button" accessibilityLabel="Skip intro" onPress={finishMontage} style={styles.skip} hitSlop={10}>
+                <Text style={styles.skipText}>Skip</Text>
+              </Pressable>
+            </SafeAreaView>
+          )}
         </View>
       )}
     </View>
@@ -253,22 +322,31 @@ export default function HomeScreen() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#087443' },
+  flex: { flex: 1 },
   page: { flexShrink: 0 },
+  topBar: { height: 56, paddingHorizontal: 22, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  wordmark: { fontSize: 13, fontWeight: '900', letterSpacing: 2.4, opacity: 0.85 },
+  rankings: { width: 40, height: 40, borderRadius: 20, borderWidth: 1.5, flexDirection: 'row', gap: 3, alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 11, opacity: 0.9 },
+  bar: { width: 3.5, borderRadius: 2 },
   main: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  open: { maxWidth: '74%', minHeight: 48, alignItems: 'center', gap: 23 },
-  pressed: { opacity: 0.7 },
-  logo: { width: 190, maxWidth: '100%', height: 170 },
-  city: { fontSize: 46, fontWeight: '900', letterSpacing: -2 },
-  caption: { fontSize: 15, fontWeight: '600', textAlign: 'center' },
+  open: { maxWidth: '78%', minHeight: 48, alignItems: 'center', gap: 20 },
+  logo: { width: 210, maxWidth: '100%', height: 190 },
+  city: { fontSize: 54, fontWeight: '900', letterSpacing: -2.5 },
+  caption: { fontSize: 17, fontWeight: '700', textAlign: 'center' },
+  statusPill: { borderWidth: 1, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 6, opacity: 0.85 },
+  status: { fontSize: 13, fontWeight: '700', letterSpacing: 0.2, opacity: 0.85 },
   arrow: { position: 'absolute', width: 46, minHeight: 48, justifyContent: 'center', alignItems: 'center' },
   left: { left: 6 },
   right: { right: 6 },
-  chevron: { fontSize: 32, lineHeight: 36 },
-  footer: { height: 60, justifyContent: 'center', alignItems: 'center' },
-  dots: { flexDirection: 'row', gap: 7 },
-  dot: { width: 5, height: 5, borderRadius: 3 },
-  rankings: { position: 'absolute', right: 14, width: 48, height: 48, flexDirection: 'row', gap: 3, alignItems: 'flex-end', paddingBottom: 14, justifyContent: 'center' },
-  bar: { width: 4, borderRadius: 2 },
+  chevron: { fontSize: 34, lineHeight: 38, opacity: 0.8 },
+  footer: { height: 64, justifyContent: 'center', alignItems: 'center' },
+  dots: { flexDirection: 'row', gap: 8, alignItems: 'center' },
+  dot: { width: 6, height: 6, borderRadius: 3 },
+  dotActive: { width: 22 },
+  skipWrap: { position: 'absolute', top: 0, right: 0, left: 0, alignItems: 'flex-end' },
+  skip: { margin: 16, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.14)' },
+  skipText: { color: '#FFFFFF', fontSize: 14, fontWeight: '700' },
+  skipDesktop: { position: 'absolute', top: 16, right: 24 },
   titleScreen: { ...StyleSheet.absoluteFill, justifyContent: 'center', alignItems: 'center', padding: 26 },
   shard: { width: 0, height: 0, borderColor: 'transparent', borderStyle: 'solid' },
   montage: { ...StyleSheet.absoluteFill, backgroundColor: '#000000' },
