@@ -17,7 +17,6 @@ type CelticsQuestion = {
   question_id: string;
   question: string;
   threshold: number;
-  scoring_type: 'combined_points' | 'celtics_points' | 'celtics_margin';
 };
 type CelticsAnswer = CelticsQuestion & {
   choice: CelticsPick | null;
@@ -36,7 +35,7 @@ type CelticsResult = {
 
 // Share initialization when more than one question is tapped on a new installation.
 let guestSession: Promise<string> | undefined;
-async function getCelticsFanId(): Promise<string> {
+async function getPredictionFanId(): Promise<string> {
   const { data: { session }, error } = await supabase.auth.getSession();
   if (error) throw error;
   if (session) return session.user.id;
@@ -95,15 +94,15 @@ function CelticsTotalPick({ gameId, startsAt }: { gameId: number; startsAt: stri
     <View style={styles.options}>
       {questions.length === 0 && <Text style={styles.secondary}>Questions will be available soon.</Text>}
       {questions.map((question) => (
-        <CelticsQuestionPick key={`${gameId}:${question.question_id}`}
+        <PredictionQuestionPick key={`${gameId}:${question.question_id}`}
           gameId={gameId} startsAt={startsAt} question={question} />
       ))}
     </View>
   );
 }
 
-function CelticsQuestionPick({ gameId, startsAt, question }: {
-  gameId: number; startsAt: string; question: CelticsQuestion;
+function PredictionQuestionPick({ gameId, startsAt, question, theme = fanSections[0].gameBackground }: {
+  gameId: number | string; startsAt: string; question: CelticsQuestion; theme?: string;
 }) {
   const deadline = Date.parse(startsAt);
   const [now, setNow] = useState(Date.now);
@@ -133,7 +132,8 @@ function CelticsQuestionPick({ gameId, startsAt, question }: {
         const { data: { session }, error } = await supabase.auth.getSession();
         if (error) throw error;
         if (!session) return;
-        const { data, error: pickError } = await supabase.from('celtics_prediction_picks')
+        const table = typeof gameId === 'number' ? 'celtics_prediction_picks' : 'team_prediction_picks';
+        const { data, error: pickError } = await supabase.from(table)
           .select('choice').eq('game_id', gameId).eq('user_id', session.user.id)
           .eq('question_id', question.question_id).maybeSingle();
         if (pickError) throw pickError;
@@ -157,10 +157,14 @@ function CelticsQuestionPick({ gameId, startsAt, question }: {
     setSaving(true);
     setMessage('');
     try {
-      const userId = await getCelticsFanId();
-      const { error } = await supabase.from('celtics_prediction_picks').upsert({
-        game_id: gameId, user_id: userId, question_id: question.question_id, choice,
-      }, { onConflict: 'game_id,user_id,question_id' });
+      const userId = await getPredictionFanId();
+      const { error } = typeof gameId === 'number'
+        ? await supabase.from('celtics_prediction_picks').upsert({
+            game_id: gameId, user_id: userId, question_id: question.question_id, choice,
+          }, { onConflict: 'game_id,user_id,question_id' })
+        : await supabase.rpc('save_team_prediction_pick', {
+            p_game_id: gameId, p_question_id: question.question_id, p_choice: choice,
+          });
       if (error?.message === 'Picks are closed for this game') {
         setServerClosed(true);
         setMessage('The deadline has passed. This change was not saved.');
@@ -184,7 +188,7 @@ function CelticsQuestionPick({ gameId, startsAt, question }: {
         <Pressable key={choice} accessibilityRole="button"
           accessibilityLabel={`${question.question} ${choice} ${question.threshold}`}
           accessibilityState={{ selected: pick === choice, disabled }} disabled={disabled}
-          style={[styles.option, pick === choice && [styles.selected, { backgroundColor: fanSections[0].gameBackground }]]}
+          style={[styles.option, pick === choice && [styles.selected, { backgroundColor: theme }]]}
           onPress={() => void savePick(choice)}>
           <Text style={styles.optionText}>{pick === choice ? '✓ ' : ''}
             {choice === 'over' ? 'Over' : 'Under'} {question.threshold}
@@ -193,7 +197,7 @@ function CelticsQuestionPick({ gameId, startsAt, question }: {
       ))}
       <Text style={styles.secondary} accessibilityLiveRegion="polite">
         {loading ? 'Checking your saved pick…' : saving ? 'Saving…'
-          : closed ? 'Picks are closed.' : 'You can change your pick until scheduled tipoff.'}
+          : closed ? 'Picks are closed.' : 'You can change your pick until the deadline.'}
       </Text>
       {!!message && <Text style={styles.secondary} accessibilityLiveRegion="polite">{message}</Text>}
       {loadError && <Pressable accessibilityRole="button" style={styles.option} onPress={() => {
@@ -233,15 +237,27 @@ function CelticsPickResult() {
     return () => { active = false; };
   }, [refresh]);
 
-  const answered = game?.questions.filter((question) => question.choice !== null) ?? [];
+  return (
+    <View style={[styles.card, { backgroundColor: fanSections[0].surface }]}>
+      <Text style={styles.question}>Latest Celtics result</Text>
+      {game && <PredictionResult game={game} />}
+      {!!message && <Text style={styles.secondary} accessibilityLiveRegion="polite">{message}</Text>}
+      <Pressable accessibilityRole="button" accessibilityState={{ disabled: loading }}
+        disabled={loading} style={styles.option} onPress={() => {
+          setLoading(true); setMessage('Loading latest result…'); setRefresh((value) => value + 1);
+        }}><Text style={styles.optionText}>Refresh result</Text></Pressable>
+    </View>
+  );
+}
+
+function PredictionResult({ game }: { game: Omit<CelticsResult, 'game_id'> }) {
+  const answered = game.questions.filter((question) => question.choice !== null);
   const graded = answered.filter((question) => question.correct_choice === 'over'
     || question.correct_choice === 'under');
   const correct = graded.filter((question) => question.choice === question.correct_choice).length;
 
   return (
-    <View style={[styles.card, { backgroundColor: fanSections[0].surface }]}>
-      <Text style={styles.question}>Latest Celtics result</Text>
-      {game && <>
+    <>
         <Text style={styles.secondary}>
           {new Date(game.starts_at).toLocaleDateString('en-US', {
             timeZone: 'America/New_York', month: 'short', day: 'numeric',
@@ -272,13 +288,7 @@ function CelticsPickResult() {
           </View>
         ))}
         <Text style={styles.secondary}>{correct} of {graded.length} graded picks correct</Text>
-      </>}
-      {!!message && <Text style={styles.secondary} accessibilityLiveRegion="polite">{message}</Text>}
-      <Pressable accessibilityRole="button" accessibilityState={{ disabled: loading }}
-        disabled={loading} style={styles.option} onPress={() => {
-          setLoading(true); setMessage('Loading latest result…'); setRefresh((value) => value + 1);
-        }}><Text style={styles.optionText}>Refresh result</Text></Pressable>
-    </View>
+    </>
   );
 }
 
@@ -350,6 +360,94 @@ const bostonGameTime = new Intl.DateTimeFormat('en-US', {
   minute: '2-digit',
   timeZoneName: 'short',
 });
+
+type LiveGame = Omit<CelticsResult, 'game_id' | 'home_score' | 'away_score'> & {
+  game_id: string;
+  closes_at: string;
+};
+type LiveSlate = {
+  active: boolean;
+  upcoming: LiveGame | null;
+  latest: (LiveGame & { home_score: number; away_score: number }) | null;
+};
+
+function useLiveSlate(team: string | undefined) {
+  const [slate, setSlate] = useState<LiveSlate | null>();
+  const [failed, setFailed] = useState(false);
+  const [refresh, setRefresh] = useState(0);
+
+  useEffect(() => {
+    if (!team) return;
+    let active = true;
+    let loading = false;
+    async function load() {
+      if (loading) return;
+      loading = true;
+      try {
+        const { data, error } = await supabase.rpc('team_prediction_slate', { p_team: team });
+        if (!active) return;
+        if (error?.code === 'PGRST202') {
+          setSlate(null);
+          setFailed(false);
+          return;
+        }
+        if (error || typeof data?.active !== 'boolean') throw new Error('Could not load predictions');
+        setSlate(data.active ? data as LiveSlate : null);
+        setFailed(false);
+      } catch {
+        if (active) setFailed(true);
+      } finally {
+        loading = false;
+      }
+    }
+    void load();
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') void load();
+    });
+    const timer = setInterval(() => { if (AppState.currentState === 'active') void load(); }, 60_000);
+    return () => { active = false; clearInterval(timer); subscription.remove(); };
+  }, [team, refresh]);
+
+  return { slate, failed, reload: () => setRefresh((value) => value + 1) };
+}
+
+function LivePredictions({ slate, name, surface, theme, refresh }: {
+  slate: LiveSlate; name: string; surface: string; theme: string; refresh: () => void;
+}) {
+  const { upcoming } = slate;
+  return (
+    <>
+      <View style={[styles.card, { backgroundColor: surface }]}>
+        <Text style={styles.team}>Next {name} game</Text>
+        {upcoming ? (
+          <>
+            <Text style={styles.question}>{upcoming.away_team_name} at {upcoming.home_team_name}</Text>
+            <Text style={styles.secondary}>{bostonGameTime.format(new Date(upcoming.starts_at))}</Text>
+            {upcoming.questions.map((question) => (
+              <PredictionQuestionPick
+                key={`${upcoming.game_id}:${question.question_id}`}
+                gameId={upcoming.game_id}
+                startsAt={upcoming.closes_at}
+                question={question}
+                theme={theme}
+              />
+            ))}
+          </>
+        ) : <Text style={styles.secondary}>No upcoming picks are published yet.</Text>}
+      </View>
+      {slate.latest || name !== 'Celtics' ? (
+        <View style={[styles.card, { backgroundColor: surface }]}>
+          <Text style={styles.team}>Latest {name} result</Text>
+          {slate.latest ? <PredictionResult game={slate.latest} />
+            : <Text style={styles.secondary}>No completed game results yet.</Text>}
+          <Pressable accessibilityRole="button" style={styles.option} onPress={refresh}>
+            <Text style={styles.optionText}>Refresh results</Text>
+          </Pressable>
+        </View>
+      ) : <CelticsPickResult />}
+    </>
+  );
+}
 
 function TeamSchedule({ team, surface }: { team: 'patriots' | 'bruins'; surface: string }) {
   const name = team === 'patriots' ? 'Patriots' : 'Bruins';
@@ -656,6 +754,8 @@ function PredictionGame({ predictions, sportId, categoryName }: {
   );
   const [shareError, setShareError] = useState('');
   const theme = getFanSection(sportId) ?? fanSections[0];
+  const { slate, failed, reload } = useLiveSlate(sportId);
+  const legacy = !sportId || slate === null;
   const pickCount = predictions.length;
   const maxPoints = pickCount * POINTS_PER_PICK;
   const selectedCount = predictions.filter((item) => state.picks[item.id] !== undefined).length;
@@ -689,15 +789,24 @@ function PredictionGame({ predictions, sportId, categoryName }: {
           dismissTo
           style={styles.link}
         >← Back to challenges</Link>
-        <Text style={styles.label}>{sportId === 'celtics' ? 'BOSTON SPORTS' : 'BOSTON SPORTS · DEMO'}</Text>
+        <Text style={styles.label}>{legacy && sportId !== 'celtics' ? 'BOSTON SPORTS · DEMO' : 'BOSTON SPORTS'}</Text>
         <Text style={styles.title}>Make your picks.</Text>
         <Text style={styles.team}>{categoryName} challenges</Text>
-        {sportId === 'celtics' && <CelticsSchedule />}
-        {sportId === 'celtics' && <CelticsPickResult />}
-        {(sportId === 'patriots' || sportId === 'bruins') && (
+        {slate && <LivePredictions slate={slate} name={categoryName} surface={theme.surface} theme={theme.gameBackground} refresh={reload} />}
+        {sportId && slate === undefined && !failed && (
+          <Text style={styles.secondary}>Loading predictions…</Text>
+        )}
+        {failed && (
+          <Pressable accessibilityRole="button" style={styles.option} onPress={reload}>
+            <Text style={styles.optionText}>Could not refresh predictions. Tap to retry.</Text>
+          </Pressable>
+        )}
+        {legacy && sportId === 'celtics' && <CelticsSchedule />}
+        {legacy && sportId === 'celtics' && <CelticsPickResult />}
+        {legacy && (sportId === 'patriots' || sportId === 'bruins') && (
           <TeamSchedule team={sportId} surface={theme.surface} />
         )}
-        {sportId !== 'celtics' && <>
+        {legacy && sportId !== 'celtics' && <>
         <View style={[styles.notice, { backgroundColor: theme.surface }]}>
           <Text style={styles.noticeTitle}>Fictional practice slate</Text>
           <Text style={styles.secondary}>
