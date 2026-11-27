@@ -1,0 +1,68 @@
+import type { FanSectionId } from '@/constants/fan-sections';
+
+/** Franchise and city moments for Timeline. `year` is the calendar year the moment happened. */
+export type TimelineEvent = { text: string; year: number };
+
+// Editorial content compiled for practice — review before any scored competition.
+export const timelineEvents: Record<FanSectionId, TimelineEvent[]> = {
+  celtics: [
+    { text: 'The Celtics play their first season in the new BAA', year: 1946 },
+    { text: 'Chuck Cooper becomes the first Black player drafted into the NBA', year: 1950 },
+    { text: 'Bill Russell arrives in Boston', year: 1956 },
+    { text: 'The Celtics win their first championship', year: 1957 },
+    { text: '“Havlicek stole the ball!”', year: 1965 },
+    { text: 'Larry Bird is drafted', year: 1978 },
+    { text: 'Bird, McHale, and Parish win their first title together', year: 1981 },
+    { text: 'The ’86 Celtics win Banner 16', year: 1986 },
+    { text: 'The Celtics move into the new FleetCenter', year: 1995 },
+    { text: 'Paul Pierce is drafted 10th overall', year: 1998 },
+    { text: 'Kevin Garnett and Ray Allen join Paul Pierce', year: 2007 },
+    { text: 'Banner 17 is raised after beating the Lakers', year: 2008 },
+    { text: 'Brad Stevens is hired as head coach', year: 2013 },
+    { text: 'Jayson Tatum is drafted 3rd overall', year: 2017 },
+    { text: 'The Celtics win Banner 18', year: 2024 },
+  ],
+  patriots: [
+    { text: 'The Boston Patriots play their first AFL season', year: 1960 },
+    { text: 'The team is renamed the New England Patriots', year: 1971 },
+    { text: 'The Patriots reach their first Super Bowl (XX)', year: 1986 },
+    { text: 'Drew Bledsoe is drafted 1st overall', year: 1993 },
+    { text: 'Bill Belichick is hired as head coach', year: 2000 },
+    { text: 'Gillette Stadium opens', year: 2002 },
+    { text: 'The Patriots win back-to-back Super Bowls (XXXVIII and XXXIX)', year: 2005 },
+    { text: 'The Patriots finish the regular season 16–0', year: 2007 },
+    { text: 'Malcolm Butler’s goal-line interception seals Super Bowl XLIX', year: 2015 },
+    { text: 'The 28–3 comeback wins Super Bowl LI', year: 2017 },
+    { text: 'Tom Brady signs with Tampa Bay', year: 2020 },
+    { text: 'Mac Jones is drafted in the first round', year: 2021 },
+    { text: 'Drake Maye is drafted 3rd overall', year: 2024 },
+  ],
+  bruins: [
+    { text: 'The Bruins become the NHL’s first U.S. team', year: 1924 },
+    { text: 'The Bruins win their first Stanley Cup', year: 1929 },
+    { text: 'Willie O’Ree breaks the NHL’s color barrier with Boston', year: 1958 },
+    { text: 'Bobby Orr’s flying goal wins the Cup', year: 1970 },
+    { text: 'The Bruins win the Stanley Cup over the Rangers', year: 1972 },
+    { text: 'The Bruins move into the new FleetCenter', year: 1995 },
+    { text: 'Ray Bourque is traded to Colorado', year: 2000 },
+    { text: 'Patrice Bergeron is drafted', year: 2003 },
+    { text: 'Boston hosts the Winter Classic at Fenway Park', year: 2010 },
+    { text: 'The Bruins win the Stanley Cup in Vancouver', year: 2011 },
+    { text: 'The Bruins rally from 4–1 down in Game 7 against Toronto', year: 2013 },
+    { text: 'The Bruins set the NHL record for wins in a season', year: 2023 },
+  ],
+  boston: [
+    { text: 'Boston Common is established', year: 1634 },
+    { text: 'Harvard is founded across the river', year: 1636 },
+    { text: 'The Boston Massacre', year: 1770 },
+    { text: 'The Boston Tea Party', year: 1773 },
+    { text: 'The USS Constitution is launched', year: 1797 },
+    { text: 'The Boston Public Library is founded', year: 1848 },
+    { text: 'The first Boston Marathon is run', year: 1897 },
+    { text: 'Fenway Park opens', year: 1912 },
+    { text: 'The Great Molasses Flood', year: 1919 },
+    { text: 'The Citgo sign rises over Kenmore Square', year: 1965 },
+    { text: 'The Red Sox break the curse', year: 2004 },
+    { text: 'The Zakim Bridge opens', year: 2003 },
+  ],
+};

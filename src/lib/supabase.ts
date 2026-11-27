@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import 'expo-sqlite/localStorage/install';
+import '@/lib/local-storage';
 import 'react-native-url-polyfill/auto';
 
 export const supabase = createClient(

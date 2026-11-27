@@ -1,10 +1,54 @@
-import { fanSections, getFanSection } from '@/constants/fan-sections';
+import { Redirect, useLocalSearchParams } from 'expo-router';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { AppState, StyleSheet, Text, View } from 'react-native';
+
+import { fanSections, getFanSection, type FanSection } from '@/constants/fan-sections';
+import { shareText } from '@/lib/share';
+import { bostonDate, bostonGameTime, bostonShortDate, formatCountdown } from '@/lib/dates';
+import { getFanId } from '@/lib/fan-session';
+import { recordResult } from '@/lib/stats';
 import { supabase } from '@/lib/supabase';
-import { Link, Redirect, useLocalSearchParams } from 'expo-router';
-import { useEffect, useReducer, useRef, useState } from 'react';
-import { AppState, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
-import { StatusBar } from 'expo-status-bar';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { Button, Card, Choice, type ChoiceState, FadeIn, Notice, PressableScale, ProgressBar, Row, Screen, Tag, useSection } from '@/ui/components';
+import { haptic } from '@/ui/haptics';
+import { palette, radius, space, type } from '@/ui/tokens';
+
+/* ================================================================ shared */
+
+function useNow(intervalMs = 1000) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), intervalMs);
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') setNow(Date.now());
+    });
+    return () => { clearInterval(timer); subscription.remove(); };
+  }, [intervalMs]);
+  return now;
+}
+
+function Matchup({ away, home, detail }: { away: string; home: string; detail: string }) {
+  return (
+    <View style={styles.matchup}>
+      <Text style={type.title}>{away}</Text>
+      <Text style={[type.eyebrow, styles.at]}>at</Text>
+      <Text style={type.title}>{home}</Text>
+      <Text style={[type.small, styles.matchupDetail]}>{detail}</Text>
+    </View>
+  );
+}
+
+function Skeleton({ lines = 3 }: { lines?: number }) {
+  return (
+    <View style={styles.skeleton} accessibilityLabel="Loading">
+      {Array.from({ length: lines }, (_, i) => (
+        <View key={i} style={[styles.skeletonLine, { width: `${90 - i * 18}%` }]} />
+      ))}
+    </View>
+  );
+}
+
+/* ================================================================ Celtics (live backend) */
+
 type UpcomingGame = {
   id: number;
   startsAt: string;
@@ -17,6 +61,7 @@ type CelticsQuestion = {
   question_id: string;
   question: string;
   threshold: number;
+  scoring_type?: 'combined_points' | 'celtics_points' | 'celtics_margin';
 };
 type CelticsAnswer = CelticsQuestion & {
   choice: CelticsPick | null;
@@ -24,7 +69,7 @@ type CelticsAnswer = CelticsQuestion & {
   correct_choice: CelticsPick | 'push' | null;
 };
 type CelticsResult = {
-  game_id: number;
+  game_id: number | string;
   starts_at: string;
   home_score: number;
   away_score: number;
@@ -33,23 +78,13 @@ type CelticsResult = {
   questions: CelticsAnswer[];
 };
 
-// Share initialization when more than one question is tapped on a new installation.
-let guestSession: Promise<string> | undefined;
-async function getPredictionFanId(): Promise<string> {
-  const { data: { session }, error } = await supabase.auth.getSession();
-  if (error) throw error;
-  if (session) return session.user.id;
-  if (!guestSession) {
-    guestSession = supabase.auth.signInAnonymously().then(({ data, error: signInError }) => {
-      if (signInError) throw signInError;
-      if (!data.session) throw new Error('Guest session unavailable');
-      return data.session.user.id;
-    }).finally(() => { guestSession = undefined; });
-  }
-  return guestSession;
-}
+const questionLabels: Record<NonNullable<CelticsQuestion['scoring_type']>, string> = {
+  combined_points: 'Total points',
+  celtics_points: 'Celtics points',
+  celtics_margin: 'Celtics margin',
+};
 
-function CelticsTotalPick({ gameId, startsAt }: { gameId: number; startsAt: string }) {
+function CelticsQuestions({ gameId, closed }: { gameId: number; closed: boolean }) {
   const [questions, setQuestions] = useState<CelticsQuestion[]>();
   const [errorMessage, setErrorMessage] = useState('');
   const [retry, setRetry] = useState(0);
@@ -78,52 +113,54 @@ function CelticsTotalPick({ gameId, startsAt }: { gameId: number; startsAt: stri
   }, [gameId, retry]);
 
   if (!questions) {
-    return (
-      <View style={styles.options}>
-        <Text style={styles.secondary}>{errorMessage || 'Loading questions…'}</Text>
-        {!!errorMessage && (
-          <Pressable accessibilityRole="button" style={styles.option} onPress={() => {
-            setErrorMessage('');
-            setRetry((value) => value + 1);
-          }}><Text style={styles.optionText}>Retry questions</Text></Pressable>
-        )}
+    return errorMessage ? (
+      <View style={styles.stack}>
+        <Text style={type.muted}>{errorMessage}</Text>
+        <Button label="Retry questions" variant="secondary" onPress={() => { setErrorMessage(''); setRetry((v) => v + 1); }} />
       </View>
-    );
+    ) : <Skeleton />;
   }
+  return <PredictionQuestions key={gameId} gameId={gameId} closed={closed} questions={questions} />;
+}
+
+function PredictionQuestions({ gameId, closed, questions }: {
+  gameId: number | string; closed: boolean; questions: CelticsQuestion[];
+}) {
+  const [saved, setSaved] = useState<Record<string, CelticsPick>>({});
+  const onSaved = useCallback((id: string, pick: CelticsPick) => setSaved((current) => ({ ...current, [id]: pick })), []);
+  const count = Object.keys(saved).length;
   return (
-    <View style={styles.options}>
-      {questions.length === 0 && <Text style={styles.secondary}>Questions will be available soon.</Text>}
+    <View style={styles.stack}>
+      {questions.length === 0 ? <Text style={type.muted}>Questions will be available soon.</Text> : (
+        <View style={styles.stack}>
+          <Row style={styles.between}>
+            <Text style={type.eyebrow}>{count} of {questions.length} picks saved</Text>
+            {count === questions.length && <Tag label="Slate complete" tone="success" />}
+          </Row>
+          <ProgressBar value={questions.length ? count / questions.length : 0} />
+        </View>
+      )}
       {questions.map((question) => (
         <PredictionQuestionPick key={`${gameId}:${question.question_id}`}
-          gameId={gameId} startsAt={startsAt} question={question} />
+          gameId={gameId} closed={closed} question={question} onSaved={onSaved} />
       ))}
     </View>
   );
 }
 
-function PredictionQuestionPick({ gameId, startsAt, question, theme = fanSections[0].gameBackground }: {
-  gameId: number | string; startsAt: string; question: CelticsQuestion; theme?: string;
+function PredictionQuestionPick({ gameId, closed: deadlinePassed, question, onSaved }: {
+  gameId: number | string; closed: boolean; question: CelticsQuestion; onSaved: (id: string, pick: CelticsPick) => void;
 }) {
-  const deadline = Date.parse(startsAt);
-  const [now, setNow] = useState(Date.now);
   const [pick, setPick] = useState<CelticsPick | null>(null);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving] = useState<CelticsPick | null>(null);
   const [serverClosed, setServerClosed] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [retry, setRetry] = useState(0);
   const [message, setMessage] = useState('');
   const saveInProgress = useRef(false);
-  const closed = !Number.isFinite(deadline) || now >= deadline || serverClosed;
-  const disabled = closed || loading || saving || loadError;
-
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    const subscription = AppState.addEventListener('change', (state) => {
-      if (state === 'active') setNow(Date.now());
-    });
-    return () => { clearInterval(timer); subscription.remove(); };
-  }, []);
+  const closed = deadlinePassed || serverClosed;
+  const disabled = closed || loading || !!saving || loadError;
 
   useEffect(() => {
     let active = true;
@@ -139,7 +176,7 @@ function PredictionQuestionPick({ gameId, startsAt, question, theme = fanSection
         if (pickError) throw pickError;
         if (active && (data?.choice === 'over' || data?.choice === 'under')) {
           setPick(data.choice);
-          setMessage('Saved pick loaded.');
+          onSaved(question.question_id, data.choice);
         }
       } catch {
         if (active) { setLoadError(true); setMessage('Could not load your saved pick.'); }
@@ -149,68 +186,134 @@ function PredictionQuestionPick({ gameId, startsAt, question, theme = fanSection
     }
     void loadPick();
     return () => { active = false; };
-  }, [gameId, question.question_id, retry]);
+  }, [gameId, onSaved, question.question_id, retry]);
 
   async function savePick(choice: CelticsPick) {
-    if (disabled || saveInProgress.current) return;
+    if (disabled || saveInProgress.current || choice === pick) return;
     saveInProgress.current = true;
-    setSaving(true);
+    setSaving(choice);
     setMessage('');
     try {
-      const userId = await getPredictionFanId();
+      const userId = await getFanId();
       const { error } = typeof gameId === 'number'
         ? await supabase.from('celtics_prediction_picks').upsert({
-            game_id: gameId, user_id: userId, question_id: question.question_id, choice,
-          }, { onConflict: 'game_id,user_id,question_id' })
+          game_id: gameId, user_id: userId, question_id: question.question_id, choice,
+        }, { onConflict: 'game_id,user_id,question_id' })
         : await supabase.rpc('save_team_prediction_pick', {
-            p_game_id: gameId, p_question_id: question.question_id, p_choice: choice,
-          });
+          p_game_id: gameId, p_question_id: question.question_id, p_choice: choice,
+        });
       if (error?.message === 'Picks are closed for this game') {
         setServerClosed(true);
-        setMessage('The deadline has passed. This change was not saved.');
+        haptic.warning();
+        setMessage('The deadline passed. This change was not saved.');
         return;
       }
       if (error) throw error;
       setPick(choice);
-      setMessage('Pick saved.');
+      onSaved(question.question_id, choice);
+      haptic.success();
+      setMessage('Pick saved');
     } catch {
-      setMessage('Could not save your pick. Please try again.');
+      haptic.error();
+      setMessage('Could not save your pick. Try again.');
     } finally {
       saveInProgress.current = false;
-      setSaving(false);
+      setSaving(null);
     }
   }
 
+  const status = loading ? 'Checking…' : saving ? 'Saving…' : closed ? (pick ? 'Locked' : 'Closed') : message || (pick ? 'Pick saved' : 'Pick one');
+
   return (
-    <View style={styles.result}>
-      <Text style={styles.question}>{question.question}</Text>
-      {(['over', 'under'] as const).map((choice) => (
-        <Pressable key={choice} accessibilityRole="button"
-          accessibilityLabel={`${question.question} ${choice} ${question.threshold}`}
-          accessibilityState={{ selected: pick === choice, disabled }} disabled={disabled}
-          style={[styles.option, pick === choice && [styles.selected, { backgroundColor: theme }]]}
-          onPress={() => void savePick(choice)}>
-          <Text style={styles.optionText}>{pick === choice ? '✓ ' : ''}
-            {choice === 'over' ? 'Over' : 'Under'} {question.threshold}
-          </Text>
-        </Pressable>
-      ))}
-      <Text style={styles.secondary} accessibilityLiveRegion="polite">
-        {loading ? 'Checking your saved pick…' : saving ? 'Saving…'
-          : closed ? 'Picks are closed.' : 'You can change your pick until the deadline.'}
-      </Text>
-      {!!message && <Text style={styles.secondary} accessibilityLiveRegion="polite">{message}</Text>}
-      {loadError && <Pressable accessibilityRole="button" style={styles.option} onPress={() => {
-        setLoadError(false); setLoading(true); setMessage(''); setRetry((value) => value + 1);
-      }}><Text style={styles.optionText}>Retry saved pick</Text></Pressable>}
-    </View>
+    <Card style={styles.questionCard}>
+      <Row style={styles.between}>
+        <Text style={type.eyebrow}>{question.scoring_type ? questionLabels[question.scoring_type] : 'Over / Under'}</Text>
+        <Text accessibilityLiveRegion="polite" style={[type.small, status === 'Pick saved' && { color: palette.success },
+          message && message !== 'Pick saved' && { color: palette.danger }]}>{status}</Text>
+      </Row>
+      <Text style={type.heading}>{question.question}</Text>
+      <Row gap={space.sm}>
+        {(['over', 'under'] as const).map((choice) => (
+          <OverUnder key={choice} choice={choice} threshold={question.threshold}
+            selected={pick === choice} pending={saving === choice} disabled={disabled}
+            label={`${question.question} ${choice} ${question.threshold}`}
+            onPress={() => void savePick(choice)} />
+        ))}
+      </Row>
+      {loadError && (
+        <Button label="Retry saved pick" variant="secondary" onPress={() => {
+          setLoadError(false); setLoading(true); setMessage(''); setRetry((v) => v + 1);
+        }} />
+      )}
+    </Card>
   );
 }
 
-function CelticsPickResult() {
+function OverUnder({ choice, threshold, selected, pending, disabled, label, onPress }: {
+  choice: CelticsPick; threshold: number; selected: boolean; pending: boolean; disabled: boolean; label: string; onPress: () => void;
+}) {
+  const section = useSection();
+  return (
+    <PressableScale accessibilityRole="button" accessibilityLabel={label}
+      accessibilityState={{ selected, disabled }} disabled={disabled} onPress={onPress} feedback="select"
+      style={[styles.ou, selected && { backgroundColor: section.accent, borderColor: section.accent },
+        pending && { borderColor: section.accent }, disabled && !selected && styles.dim]}>
+      <Text style={[styles.ouLabel, selected && { color: palette.dark }]}>{choice === 'over' ? '▲ Over' : '▼ Under'}</Text>
+      <Text style={[styles.ouValue, selected && { color: palette.dark }]}>{threshold}</Text>
+    </PressableScale>
+  );
+}
+
+function CelticsNextGame() {
+  const [schedule, setSchedule] = useState<{ game: UpcomingGame | null; error: boolean }>();
+  const [retry, setRetry] = useState(0);
+  const now = useNow();
+
+  useEffect(() => {
+    let active = true;
+    async function loadSchedule() {
+      try {
+        const { data, error } = await supabase.functions.invoke<{ games: UpcomingGame[] }>('test-celtics-schedule', { method: 'GET' });
+        if (error || !data || !Array.isArray(data.games)) throw new Error('Could not load Celtics schedule');
+        if (active) setSchedule({ game: data.games[0] ?? null, error: false });
+      } catch {
+        if (active) setSchedule({ game: null, error: true });
+      }
+    }
+    void loadSchedule();
+    return () => { active = false; };
+  }, [retry]);
+
+  const game = schedule?.game;
+  const deadline = game ? Date.parse(game.startsAt) : NaN;
+  const closed = !Number.isFinite(deadline) || now >= deadline;
+
+  return (
+    <Card tone="raised" style={styles.hero}>
+      <Row style={styles.between}>
+        <Text style={type.eyebrow}>Next game</Text>
+        {game && <Tag label={closed ? 'Picks locked' : `Locks in ${formatCountdown(deadline - now)}`} tone={closed ? 'danger' : 'accent'} />}
+      </Row>
+      {game ? (
+        <>
+          <Matchup away={game.awayTeam} home={game.homeTeam} detail={`${game.tipoffBoston} Boston time`} />
+          <CelticsQuestions key={game.id} gameId={game.id} closed={closed} />
+          <Text style={type.small}>Change picks any time before tipoff. No wagering — just bragging rights.</Text>
+        </>
+      ) : !schedule ? <Skeleton /> : (
+        <View style={styles.stack}>
+          <Text style={type.muted}>{schedule.error ? 'Couldn’t load the Celtics schedule.' : 'No Celtics games in the next seven days.'}</Text>
+          {schedule.error && <Button label="Try again" variant="secondary" onPress={() => { setSchedule(undefined); setRetry((v) => v + 1); }} />}
+        </View>
+      )}
+    </Card>
+  );
+}
+
+function CelticsLatestResult() {
   const [refresh, setRefresh] = useState(0);
   const [game, setGame] = useState<CelticsResult | null>(null);
-  const [message, setMessage] = useState('Loading latest result…');
+  const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -225,7 +328,7 @@ function CelticsPickResult() {
         }
         if (active) {
           setGame(data as CelticsResult | null);
-          setMessage(data ? '' : 'No completed game results available yet.');
+          setMessage(data ? '' : 'No completed game results yet.');
         }
       } catch {
         if (active) { setGame(null); setMessage('Could not load the result. Try refreshing.'); }
@@ -237,129 +340,85 @@ function CelticsPickResult() {
     return () => { active = false; };
   }, [refresh]);
 
-  return (
-    <View style={[styles.card, { backgroundColor: fanSections[0].surface }]}>
-      <Text style={styles.question}>Latest Celtics result</Text>
-      {game && <PredictionResult game={game} />}
-      {!!message && <Text style={styles.secondary} accessibilityLiveRegion="polite">{message}</Text>}
-      <Pressable accessibilityRole="button" accessibilityState={{ disabled: loading }}
-        disabled={loading} style={styles.option} onPress={() => {
-          setLoading(true); setMessage('Loading latest result…'); setRefresh((value) => value + 1);
-        }}><Text style={styles.optionText}>Refresh result</Text></Pressable>
-    </View>
-  );
+  return <LatestResult game={game} section={fanSections[0]} message={message} loading={loading}
+    onRefresh={() => { setLoading(true); setMessage(''); setRefresh((v) => v + 1); }} />;
 }
 
-function PredictionResult({ game }: { game: Omit<CelticsResult, 'game_id'> }) {
-  const answered = game.questions.filter((question) => question.choice !== null);
-  const graded = answered.filter((question) => question.correct_choice === 'over'
-    || question.correct_choice === 'under');
-  const correct = graded.filter((question) => question.choice === question.correct_choice).length;
-
-  return (
-    <>
-        <Text style={styles.secondary}>
-          {new Date(game.starts_at).toLocaleDateString('en-US', {
-            timeZone: 'America/New_York', month: 'short', day: 'numeric',
-          })} · Final score{'\n'}
-          {game.away_team_name ?? 'Away'} {game.away_score}, {' '}
-          {game.home_team_name ?? 'Home'} {game.home_score}
-        </Text>
-        {game.questions.map((question) => (
-          <View key={question.question_id} style={styles.result}>
-            <Text style={styles.question}>{question.question}</Text>
-            <Text style={styles.secondary}>
-              {question.correct_choice === null ? 'Grading is waiting for team details.'
-                : question.correct_choice === 'push' ? 'Total matched the line · Push'
-                : `Correct answer: ${question.correct_choice === 'over' ? 'Over' : 'Under'} ${question.threshold}`}
-              {question.actual !== null ? ` · Actual: ${question.actual}` : ''}
-            </Text>
-            <Text style={styles.secondary}>
-              {question.choice === null ? 'You did not make a pick for this question.'
-                : `Your pick: ${question.choice === 'over' ? 'Over' : 'Under'} ${question.threshold}`}
-            </Text>
-            {question.choice !== null && question.correct_choice !== null
-              && question.correct_choice !== 'push' && (
-              <Text style={[styles.resultText,
-                question.choice === question.correct_choice ? styles.correct : styles.incorrect]}>
-                {question.choice === question.correct_choice ? 'Correct' : 'Incorrect'}
-              </Text>
-            )}
-          </View>
-        ))}
-        <Text style={styles.secondary}>{correct} of {graded.length} graded picks correct</Text>
-    </>
-  );
-}
-
-function CelticsSchedule() {
-  const [schedule, setSchedule] = useState<{
-    game: UpcomingGame | null;
-    error: boolean;
-  }>();
+function LatestResult({ game, section, message, loading, onRefresh }: {
+  game: CelticsResult | null; section: FanSection; message: string; loading: boolean; onRefresh: () => void;
+}) {
+  const answered = game?.questions.filter((q) => q.choice !== null) ?? [];
+  const graded = answered.filter((q) => q.correct_choice === 'over' || q.correct_choice === 'under');
+  const correct = graded.filter((q) => q.choice === q.correct_choice).length;
 
   useEffect(() => {
-    let active = true;
+    if (!game || graded.length === 0) return;
+    recordResult({
+      id: `predictions:${section.id}:${game.game_id}`, game: 'predictions', section: section.id,
+      date: bostonDate(new Date(game.starts_at)), score: correct * 100, max: graded.length * 100,
+      practice: false, summary: `${correct}/${graded.length} picks correct`,
+    });
+  }, [correct, game, graded.length, section.id]);
 
-    async function loadSchedule() {
-      try {
-        const { data, error } = await supabase.functions.invoke<{
-          games: UpcomingGame[];
-        }>('test-celtics-schedule', { method: 'GET' });
-
-        if (error || !data || !Array.isArray(data.games)) {
-          throw new Error('Could not load Celtics schedule');
-        }
-
-        if (active) {
-          setSchedule({ game: data.games[0] ?? null, error: false });
-        }
-      } catch {
-        if (active) {
-          setSchedule({ game: null, error: true });
-        }
-      }
-    }
-
-    void loadSchedule();
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  const game = schedule?.game;
+  const home = game?.home_team_name?.includes(section.name) ?? false;
+  const margin = game ? (home ? game.home_score - game.away_score : game.away_score - game.home_score) : 0;
 
   return (
-    <View style={[styles.card, { backgroundColor: fanSections[0].surface }]}>
-      <Text style={styles.team}>Next Celtics game</Text>
-      {game ? (
+    <Card style={styles.hero}>
+      <Row style={styles.between}>
+        <Text style={type.eyebrow}>Latest result</Text>
+        {game && graded.length > 0 && <Tag label={`${correct}/${graded.length} correct`} tone={correct === graded.length ? 'success' : correct === 0 ? 'danger' : 'gold'} />}
+      </Row>
+      {loading && !game ? <Skeleton /> : game ? (
         <>
-          <Text style={styles.question}>{game.awayTeam} at {game.homeTeam}</Text>
-          <Text style={styles.secondary}>{game.tipoffBoston} Boston time</Text>
-          <CelticsTotalPick key={game.id} gameId={game.id} startsAt={game.startsAt} />
+          <View style={styles.scoreboard}>
+            <View style={styles.scoreTeam}>
+              <Text style={type.small} numberOfLines={1}>{game.away_team_name ?? 'Away'}</Text>
+              <Text style={styles.scoreValue}>{game.away_score}</Text>
+            </View>
+            <View style={styles.scoreMid}>
+              <Text style={type.eyebrow}>Final</Text>
+              <Text style={type.small}>{bostonShortDate.format(new Date(game.starts_at))}</Text>
+            </View>
+            <View style={[styles.scoreTeam, styles.alignEnd]}>
+              <Text style={type.small} numberOfLines={1}>{game.home_team_name ?? 'Home'}</Text>
+              <Text style={styles.scoreValue}>{game.home_score}</Text>
+            </View>
+          </View>
+          {game.home_team_name && game.away_team_name && (
+            <Text style={[type.small, { color: margin > 0 ? palette.success : margin < 0 ? palette.danger : palette.textMuted }]}>
+              {margin === 0 ? 'Tie game' : `${section.name} ${margin > 0 ? 'win' : 'loss'}`}
+            </Text>
+          )}
+          {game.questions.map((q) => {
+            const pickLabel = q.choice === null ? 'No pick' : `${q.choice === 'over' ? 'Over' : 'Under'} ${q.threshold}`;
+            const gradedPick = q.choice !== null && (q.correct_choice === 'over' || q.correct_choice === 'under');
+            const won = gradedPick && q.choice === q.correct_choice;
+            return (
+              <View key={q.question_id} style={styles.resultRow}>
+                <Text style={[styles.resultMark, { color: !gradedPick ? palette.textFaint : won ? palette.success : palette.danger }]}>
+                  {q.correct_choice === 'push' ? '=' : !gradedPick ? '–' : won ? '✓' : '✕'}
+                </Text>
+                <View style={styles.flex}>
+                  <Text style={type.body}>{q.question}</Text>
+                  <Text style={type.small}>
+                    You: {pickLabel}
+                    {q.actual !== null ? ` · Actual ${q.actual}` : ''}
+                    {q.correct_choice === 'push' ? ' · Push' : q.correct_choice === null ? ' · Awaiting grading' : ''}
+                  </Text>
+                </View>
+              </View>
+            );
+          })}
+          <Text style={type.small}>{correct} of {graded.length} graded picks correct · pushes and missed picks don’t count.</Text>
         </>
-      ) : (
-        <Text style={styles.secondary}>
-          {!schedule ? 'Loading schedule…' : schedule.error
-            ? 'Could not load the Celtics schedule.'
-            : 'No Celtics games in the next seven days.'}
-        </Text>
-      )}
-    </View>
+      ) : null}
+      {!!message && <Text style={type.muted} accessibilityLiveRegion="polite">{message}</Text>}
+      <Button label="Refresh result" variant="secondary" loading={loading && !!game} disabled={loading}
+        onPress={onRefresh} />
+    </Card>
   );
 }
-
-type TeamScheduleGame = Pick<UpcomingGame, 'homeTeam' | 'awayTeam' | 'startsAt'>;
-
-const bostonGameTime = new Intl.DateTimeFormat('en-US', {
-  timeZone: 'America/New_York',
-  weekday: 'short',
-  month: 'short',
-  day: 'numeric',
-  hour: 'numeric',
-  minute: '2-digit',
-  timeZoneName: 'short',
-});
 
 type LiveGame = Omit<CelticsResult, 'game_id' | 'home_score' | 'away_score'> & {
   game_id: string;
@@ -411,55 +470,20 @@ function useLiveSlate(team: string | undefined) {
   return { slate, failed, reload: () => setRefresh((value) => value + 1) };
 }
 
-function LivePredictions({ slate, name, surface, theme, refresh }: {
-  slate: LiveSlate; name: string; surface: string; theme: string; refresh: () => void;
-}) {
-  const { upcoming } = slate;
-  return (
-    <>
-      <View style={[styles.card, { backgroundColor: surface }]}>
-        <Text style={styles.team}>Next {name} game</Text>
-        {upcoming ? (
-          <>
-            <Text style={styles.question}>{upcoming.away_team_name} at {upcoming.home_team_name}</Text>
-            <Text style={styles.secondary}>{bostonGameTime.format(new Date(upcoming.starts_at))}</Text>
-            {upcoming.questions.map((question) => (
-              <PredictionQuestionPick
-                key={`${upcoming.game_id}:${question.question_id}`}
-                gameId={upcoming.game_id}
-                startsAt={upcoming.closes_at}
-                question={question}
-                theme={theme}
-              />
-            ))}
-          </>
-        ) : <Text style={styles.secondary}>No upcoming picks are published yet.</Text>}
-      </View>
-      {slate.latest || name !== 'Celtics' ? (
-        <View style={[styles.card, { backgroundColor: surface }]}>
-          <Text style={styles.team}>Latest {name} result</Text>
-          {slate.latest ? <PredictionResult game={slate.latest} />
-            : <Text style={styles.secondary}>No completed game results yet.</Text>}
-          <Pressable accessibilityRole="button" style={styles.option} onPress={refresh}>
-            <Text style={styles.optionText}>Refresh results</Text>
-          </Pressable>
-        </View>
-      ) : <CelticsPickResult />}
-    </>
-  );
-}
+/* ================================================================ Patriots / Bruins schedule */
 
-function TeamSchedule({ team, surface }: { team: 'patriots' | 'bruins'; surface: string }) {
-  const name = team === 'patriots' ? 'Patriots' : 'Bruins';
+type TeamScheduleGame = Pick<UpcomingGame, 'homeTeam' | 'awayTeam' | 'startsAt'>;
+
+function TeamNextGame({ team, name }: { team: 'patriots' | 'bruins'; name: string }) {
   const [schedule, setSchedule] = useState<{ game: TeamScheduleGame | null; error?: boolean }>();
+  const now = useNow(30_000);
 
   useEffect(() => {
     let active = true;
     async function load() {
       try {
         const { data, error } = await supabase.functions.invoke<{ game: TeamScheduleGame | null }>(
-          `team-prediction-schedule?team=${team}`,
-          { method: 'GET' },
+          `team-prediction-schedule?team=${team}`, { method: 'GET' },
         );
         if (error || !data || (data.game !== null &&
             (!data.game?.homeTeam || !data.game.awayTeam || !Number.isFinite(Date.parse(data.game.startsAt))))) {
@@ -476,24 +500,50 @@ function TeamSchedule({ team, surface }: { team: 'patriots' | 'bruins'; surface:
 
   const game = schedule?.game;
   return (
-    <View style={[styles.card, { backgroundColor: surface }]}>
-      <Text style={styles.team}>Next {name} game</Text>
+    <Card tone="raised" style={styles.hero}>
+      <Row style={styles.between}>
+        <Text style={type.eyebrow}>Next game</Text>
+        <Tag label="Live picks soon" tone="gold" />
+      </Row>
       {game ? (
-        <>
-          <Text style={styles.question}>{game.awayTeam} at {game.homeTeam}</Text>
-          <Text style={styles.secondary}>{bostonGameTime.format(new Date(game.startsAt))}</Text>
-          <Text style={styles.secondary}>Live picks are coming soon.</Text>
-        </>
-      ) : (
-        <Text style={styles.secondary}>
-          {!schedule ? 'Loading schedule…' : schedule.error
-            ? 'Schedule unavailable right now.'
-            : `No ${name} games scheduled in the next seven days.`}
-        </Text>
+        <Matchup away={game.awayTeam} home={game.homeTeam}
+          detail={`${bostonGameTime.format(new Date(game.startsAt))} · in ${formatCountdown(Date.parse(game.startsAt) - now)}`} />
+      ) : !schedule ? <Skeleton lines={2} /> : (
+        <Text style={type.muted}>{schedule.error ? 'Schedule unavailable right now.' : `No ${name} games in the next seven days.`}</Text>
       )}
-    </View>
+    </Card>
   );
 }
+
+function SharedPredictions({ section, slate, refresh }: { section: FanSection; slate: LiveSlate; refresh: () => void }) {
+  const now = useNow();
+  const game = slate.upcoming;
+  const deadline = game ? Date.parse(game.closes_at) : NaN;
+  return (
+    <>
+      <Card tone="raised" style={styles.hero}>
+        <Row style={styles.between}>
+          <Text style={type.eyebrow}>Next game</Text>
+          <Tag label={game && now >= deadline ? 'Picks closed' : 'Live predictions'} tone="gold" />
+        </Row>
+        {game ? (
+          <>
+            <Matchup away={game.away_team_name ?? 'Away'} home={game.home_team_name ?? 'Home'}
+              detail={bostonGameTime.format(new Date(game.starts_at))} />
+            <PredictionQuestions key={game.game_id} gameId={game.game_id}
+              closed={!Number.isFinite(deadline) || now >= deadline} questions={game.questions} />
+          </>
+        ) : <Text style={type.muted}>No upcoming picks are published yet.</Text>}
+      </Card>
+      {slate.latest || section.id !== 'celtics' ? (
+        <LatestResult game={slate.latest} section={section}
+          message={slate.latest ? '' : 'No completed game results yet.'} loading={false} onRefresh={refresh} />
+      ) : <CelticsLatestResult />}
+    </>
+  );
+}
+
+/* ================================================================ practice slate */
 
 type Prediction = {
   id: string;
@@ -508,205 +558,63 @@ type Prediction = {
 // Entirely fictional examples for testing the interface, not scheduled games,
 // real player projections, betting lines, or actual results.
 const allPredictions: Prediction[] = [
-  {
-    id: 'patriots-spread',
-    team: 'Patriots',
-    category: 'POINT SPREAD · PATRIOTS -6.5',
-    question: 'Will the Patriots beat the Jets by 7 or more points?',
-    choices: ['Yes · win by 7 or more', 'No · win by 6 or fewer, tie, or lose'],
-    correctIndex: 0,
-    simulatedResult: 'Simulated final: Patriots 24, Jets 17. New England wins by 7 and covers -6.5.',
-  },
-  {
-    id: 'celtics-player-assists',
-    team: 'Celtics',
-    category: 'PLAYER ASSISTS',
-    question: 'Will Jayson Tatum have more than 4 assists?',
-    choices: ['Yes · 5 or more assists', 'No · 4 or fewer assists'],
-    correctIndex: 0,
-    simulatedResult: 'Simulated result: Tatum records 6 assists. More than 4 means 5 or more.',
-  },
-  {
-    id: 'bruins-mcavoy-points',
-    team: 'Bruins',
-    category: 'PLAYER POINTS · GOALS + ASSISTS',
-    question: 'Will Charlie McAvoy record at least 2 points?',
-    choices: ['Yes · 2 or more points', 'No · 0 or 1 point'],
-    correctIndex: 1,
-    simulatedResult: 'Simulated result: McAvoy has 0 goals and 1 assist, totaling 1 point.',
-  },
-  {
-    id: 'red-sox-run-line',
-    team: 'Red Sox',
-    category: 'RUN LINE · RED SOX -1.5',
-    question: 'Will the Red Sox beat the Yankees by 2 or more runs?',
-    choices: ['Yes · win by 2 or more runs', 'No · win by 1 run or lose'],
-    correctIndex: 1,
-    simulatedResult: 'Simulated final: Yankees 5, Red Sox 3. Boston loses and does not cover -1.5.',
-  },
-  {
-    id: "patriots-total",
-    team: "Patriots",
-    category: "TOTAL POINTS",
-    question: "Will Patriots–Jets finish with at least 42 combined points?",
-    choices: ["Yes · 42 or more", "No · 41 or fewer"],
-    correctIndex: 1,
-    simulatedResult: "Simulated result: Patriots 24, Jets 17. Combined points: 41.",
-  },
-  {
-    id: "patriots-passing",
-    team: "Patriots",
-    category: "PASSING YARDS",
-    question: "Will the Patriots quarterback throw for at least 225 yards?",
-    choices: ["Yes · 225 or more", "No · 224 or fewer"],
-    correctIndex: 0,
-    simulatedResult: "Simulated result: The Patriots quarterback throws for 238 yards.",
-  },
-  {
-    id: "patriots-rushing",
-    team: "Patriots",
-    category: "RUSHING YARDS",
-    question: "Will the Patriots lead running back rush for at least 70 yards?",
-    choices: ["Yes · 70 or more", "No · 69 or fewer"],
-    correctIndex: 0,
-    simulatedResult: "Simulated result: The lead running back rushes for 76 yards.",
-  },
-  {
-    id: "patriots-sacks",
-    team: "Patriots",
-    category: "TEAM SACKS",
-    question: "Will the Patriots defense record at least 3 sacks?",
-    choices: ["Yes · 3 or more", "No · 2 or fewer"],
-    correctIndex: 1,
-    simulatedResult: "Simulated result: New England records 2 sacks.",
-  },
-  {
-    id: "celtics-spread",
-    team: "Celtics",
-    category: "POINT SPREAD · CELTICS -5.5",
-    question: "Will the Celtics beat the Knicks by 6 or more points?",
-    choices: ["Yes · Win by 6 or more", "No · Win by 5 or fewer, or lose"],
-    correctIndex: 0,
-    simulatedResult: "Simulated result: Celtics 112, Knicks 105. Boston wins by 7.",
-  },
-  {
-    id: "celtics-total",
-    team: "Celtics",
-    category: "TOTAL POINTS",
-    question: "Will Celtics–Knicks finish with at least 220 combined points?",
-    choices: ["Yes · 220 or more", "No · 219 or fewer"],
-    correctIndex: 1,
-    simulatedResult: "Simulated result: Celtics 112, Knicks 105. Combined points: 217.",
-  },
-  {
-    id: "celtics-player-points",
-    team: "Celtics",
-    category: "PLAYER POINTS",
-    question: "Will Jayson Tatum score at least 28 points?",
-    choices: ["Yes · 28 or more", "No · 27 or fewer"],
-    correctIndex: 0,
-    simulatedResult: "Simulated result: Tatum scores 31 points.",
-  },
-  {
-    id: "celtics-player-rebounds",
-    team: "Celtics",
-    category: "PLAYER REBOUNDS",
-    question: "Will Jayson Tatum grab at least 8 rebounds?",
-    choices: ["Yes · 8 or more", "No · 7 or fewer"],
-    correctIndex: 1,
-    simulatedResult: "Simulated result: Tatum grabs 7 rebounds.",
-  },
-  {
-    id: "bruins-puck-line",
-    team: "Bruins",
-    category: "PUCK LINE · BRUINS -1.5",
-    question: "Will the Bruins beat the Canadiens by 2 or more goals?",
-    choices: ["Yes · Win by 2 or more", "No · Win by 1 or lose"],
-    correctIndex: 1,
-    simulatedResult: "Simulated result: Bruins 3, Canadiens 2. Boston wins by 1.",
-  },
-  {
-    id: "bruins-total",
-    team: "Bruins",
-    category: "TOTAL GOALS",
-    question: "Will Bruins–Canadiens finish with at least 6 combined goals?",
-    choices: ["Yes · 6 or more", "No · 5 or fewer"],
-    correctIndex: 1,
-    simulatedResult: "Simulated result: Bruins 3, Canadiens 2. Combined goals: 5.",
-  },
-  {
-    id: "bruins-saves",
-    team: "Bruins",
-    category: "GOALIE SAVES",
-    question: "Will Boston’s starting goalie make at least 28 saves?",
-    choices: ["Yes · 28 or more", "No · 27 or fewer"],
-    correctIndex: 0,
-    simulatedResult: "Simulated result: Boston’s starting goalie makes 30 saves.",
-  },
-  {
-    id: "bruins-shots",
-    team: "Bruins",
-    category: "SHOTS ON GOAL",
-    question: "Will Charlie McAvoy have at least 3 shots on goal?",
-    choices: ["Yes · 3 or more", "No · 2 or fewer"],
-    correctIndex: 0,
-    simulatedResult: "Simulated result: McAvoy records 4 shots on goal.",
-  },
-  {
-    id: "red-sox-total",
-    team: "Red Sox",
-    category: "TOTAL RUNS",
-    question: "Will Red Sox–Yankees finish with at least 9 combined runs?",
-    choices: ["Yes · 9 or more", "No · 8 or fewer"],
-    correctIndex: 1,
-    simulatedResult: "Simulated result: Yankees 5, Red Sox 3. Combined runs: 8.",
-  },
-  {
-    id: "red-sox-strikeouts",
-    team: "Red Sox",
-    category: "PITCHER STRIKEOUTS",
-    question: "Will Boston’s starting pitcher strike out at least 6 batters?",
-    choices: ["Yes · 6 or more", "No · 5 or fewer"],
-    correctIndex: 0,
-    simulatedResult: "Simulated result: Boston’s starter strikes out 7 batters.",
-  },
-  {
-    id: "red-sox-hits",
-    team: "Red Sox",
-    category: "TEAM HITS",
-    question: "Will the Red Sox collect at least 8 hits?",
-    choices: ["Yes · 8 or more", "No · 7 or fewer"],
-    correctIndex: 0,
-    simulatedResult: "Simulated result: Boston collects 9 hits.",
-  },
-  {
-    id: "red-sox-home-runs",
-    team: "Red Sox",
-    category: "TEAM HOME RUNS",
-    question: "Will the Red Sox hit at least 2 home runs?",
-    choices: ["Yes · 2 or more", "No · 1 or fewer"],
-    correctIndex: 1,
-    simulatedResult: "Simulated result: Boston hits 1 home run.",
-  },
+  { id: 'patriots-spread', team: 'Patriots', category: 'Point spread · Patriots -6.5', question: 'Will the Patriots beat the Jets by 7 or more points?',
+    choices: ['Yes · win by 7 or more', 'No · win by 6 or fewer, tie, or lose'], correctIndex: 0,
+    simulatedResult: 'Simulated final: Patriots 24, Jets 17. New England wins by 7 and covers -6.5.' },
+  { id: 'patriots-total', team: 'Patriots', category: 'Total points', question: 'Will Patriots–Jets finish with at least 42 combined points?',
+    choices: ['Yes · 42 or more', 'No · 41 or fewer'], correctIndex: 1, simulatedResult: 'Simulated: Patriots 24, Jets 17. Combined points: 41.' },
+  { id: 'patriots-passing', team: 'Patriots', category: 'Passing yards', question: 'Will the Patriots quarterback throw for at least 225 yards?',
+    choices: ['Yes · 225 or more', 'No · 224 or fewer'], correctIndex: 0, simulatedResult: 'Simulated: the Patriots quarterback throws for 238 yards.' },
+  { id: 'patriots-rushing', team: 'Patriots', category: 'Rushing yards', question: 'Will the Patriots lead running back rush for at least 70 yards?',
+    choices: ['Yes · 70 or more', 'No · 69 or fewer'], correctIndex: 0, simulatedResult: 'Simulated: the lead running back rushes for 76 yards.' },
+  { id: 'patriots-sacks', team: 'Patriots', category: 'Team sacks', question: 'Will the Patriots defense record at least 3 sacks?',
+    choices: ['Yes · 3 or more', 'No · 2 or fewer'], correctIndex: 1, simulatedResult: 'Simulated: New England records 2 sacks.' },
+  { id: 'celtics-spread', team: 'Celtics', category: 'Point spread · Celtics -5.5', question: 'Will the Celtics beat the Knicks by 6 or more points?',
+    choices: ['Yes · win by 6 or more', 'No · win by 5 or fewer, or lose'], correctIndex: 0, simulatedResult: 'Simulated: Celtics 112, Knicks 105. Boston wins by 7.' },
+  { id: 'celtics-total', team: 'Celtics', category: 'Total points', question: 'Will Celtics–Knicks finish with at least 220 combined points?',
+    choices: ['Yes · 220 or more', 'No · 219 or fewer'], correctIndex: 1, simulatedResult: 'Simulated: Celtics 112, Knicks 105. Combined points: 217.' },
+  { id: 'celtics-player-points', team: 'Celtics', category: 'Player points', question: 'Will Jayson Tatum score at least 28 points?',
+    choices: ['Yes · 28 or more', 'No · 27 or fewer'], correctIndex: 0, simulatedResult: 'Simulated: Tatum scores 31 points.' },
+  { id: 'celtics-player-assists', team: 'Celtics', category: 'Player assists', question: 'Will Jayson Tatum have more than 4 assists?',
+    choices: ['Yes · 5 or more assists', 'No · 4 or fewer assists'], correctIndex: 0, simulatedResult: 'Simulated: Tatum records 6 assists.' },
+  { id: 'celtics-player-rebounds', team: 'Celtics', category: 'Player rebounds', question: 'Will Jayson Tatum grab at least 8 rebounds?',
+    choices: ['Yes · 8 or more', 'No · 7 or fewer'], correctIndex: 1, simulatedResult: 'Simulated: Tatum grabs 7 rebounds.' },
+  { id: 'bruins-puck-line', team: 'Bruins', category: 'Puck line · Bruins -1.5', question: 'Will the Bruins beat the Canadiens by 2 or more goals?',
+    choices: ['Yes · win by 2 or more', 'No · win by 1 or lose'], correctIndex: 1, simulatedResult: 'Simulated: Bruins 3, Canadiens 2. Boston wins by 1.' },
+  { id: 'bruins-total', team: 'Bruins', category: 'Total goals', question: 'Will Bruins–Canadiens finish with at least 6 combined goals?',
+    choices: ['Yes · 6 or more', 'No · 5 or fewer'], correctIndex: 1, simulatedResult: 'Simulated: Bruins 3, Canadiens 2. Combined goals: 5.' },
+  { id: 'bruins-mcavoy-points', team: 'Bruins', category: 'Player points · goals + assists', question: 'Will Charlie McAvoy record at least 2 points?',
+    choices: ['Yes · 2 or more points', 'No · 0 or 1 point'], correctIndex: 1, simulatedResult: 'Simulated: McAvoy has 0 goals and 1 assist.' },
+  { id: 'bruins-saves', team: 'Bruins', category: 'Goalie saves', question: 'Will Boston’s starting goalie make at least 28 saves?',
+    choices: ['Yes · 28 or more', 'No · 27 or fewer'], correctIndex: 0, simulatedResult: 'Simulated: Boston’s starting goalie makes 30 saves.' },
+  { id: 'bruins-shots', team: 'Bruins', category: 'Shots on goal', question: 'Will Charlie McAvoy have at least 3 shots on goal?',
+    choices: ['Yes · 3 or more', 'No · 2 or fewer'], correctIndex: 0, simulatedResult: 'Simulated: McAvoy records 4 shots on goal.' },
+  // Red Sox examples are kept for the team's return after the MVP.
+  { id: 'red-sox-run-line', team: 'Red Sox', category: 'Run line · Red Sox -1.5', question: 'Will the Red Sox beat the Yankees by 2 or more runs?',
+    choices: ['Yes · win by 2 or more runs', 'No · win by 1 run or lose'], correctIndex: 1, simulatedResult: 'Simulated: Yankees 5, Red Sox 3.' },
+  { id: 'red-sox-total', team: 'Red Sox', category: 'Total runs', question: 'Will Red Sox–Yankees finish with at least 9 combined runs?',
+    choices: ['Yes · 9 or more', 'No · 8 or fewer'], correctIndex: 1, simulatedResult: 'Simulated: Yankees 5, Red Sox 3. Combined runs: 8.' },
+  { id: 'red-sox-strikeouts', team: 'Red Sox', category: 'Pitcher strikeouts', question: 'Will Boston’s starting pitcher strike out at least 6 batters?',
+    choices: ['Yes · 6 or more', 'No · 5 or fewer'], correctIndex: 0, simulatedResult: 'Simulated: Boston’s starter strikes out 7.' },
+  { id: 'red-sox-hits', team: 'Red Sox', category: 'Team hits', question: 'Will the Red Sox collect at least 8 hits?',
+    choices: ['Yes · 8 or more', 'No · 7 or fewer'], correctIndex: 0, simulatedResult: 'Simulated: Boston collects 9 hits.' },
+  { id: 'red-sox-home-runs', team: 'Red Sox', category: 'Team home runs', question: 'Will the Red Sox hit at least 2 home runs?',
+    choices: ['Yes · 2 or more', 'No · 1 or fewer'], correctIndex: 1, simulatedResult: 'Simulated: Boston hits 1 home run.' },
 ];
 
 const POINTS_PER_PICK = 100;
 type Stage = 'picking' | 'locked' | 'settled';
 type Picks = Record<string, number>;
 type State = { picks: Picks; stage: Stage };
-type Action =
-  | { type: 'pick'; id: string; choice: number }
-  | { type: 'lock' }
-  | { type: 'settle' };
+type Action = { type: 'pick'; id: string; choice: number } | { type: 'lock' } | { type: 'settle' } | { type: 'reset' };
 const initialState: State = { picks: {}, stage: 'picking' };
 
 function completePicks(picks: Picks, predictions: Prediction[]) {
-  return predictions.every((item) =>
-    Number.isInteger(picks[item.id]) && picks[item.id] >= 0 && picks[item.id] < item.choices.length
-  );
+  return predictions.every((item) => Number.isInteger(picks[item.id]) && picks[item.id] >= 0 && picks[item.id] < item.choices.length);
 }
 
 function predictionReducer(state: State, action: Action, predictions: Prediction[]): State {
+  if (action.type === 'reset') return initialState;
   if (action.type === 'pick') {
     const item = predictions.find((entry) => entry.id === action.id);
     if (state.stage !== 'picking' || !item || !Number.isInteger(action.choice)
@@ -714,15 +622,94 @@ function predictionReducer(state: State, action: Action, predictions: Prediction
     return { ...state, picks: { ...state.picks, [action.id]: action.choice } };
   }
   if (action.type === 'lock') {
-    return state.stage === 'picking' && completePicks(state.picks, predictions)
-      ? { ...state, stage: 'locked' } : state;
+    return state.stage === 'picking' && completePicks(state.picks, predictions) ? { ...state, stage: 'locked' } : state;
   }
   return state.stage === 'locked' ? { ...state, stage: 'settled' } : state;
 }
 
-function countCorrect(picks: Picks, predictions: Prediction[]) {
-  return predictions.filter((item) => picks[item.id] === item.correctIndex).length;
+function PracticeSlate({ predictions, categoryName }: { predictions: Prediction[]; categoryName: string }) {
+  const [state, dispatch] = useReducer((current: State, action: Action) => predictionReducer(current, action, predictions), initialState);
+  const [shareError, setShareError] = useState('');
+  const pickCount = predictions.length;
+  const selectedCount = predictions.filter((item) => state.picks[item.id] !== undefined).length;
+  const ready = completePicks(state.picks, predictions);
+  const settled = state.stage === 'settled';
+  const correct = predictions.filter((item) => state.picks[item.id] === item.correctIndex).length;
+  const points = correct * POINTS_PER_PICK;
+
+  async function sharePicks() {
+    try {
+      setShareError('');
+      const grid = predictions.map((item) => state.picks[item.id] === item.correctIndex ? '🟩' : '🟥').join('');
+      await shareText(`Stadium Pulse · ${categoryName} practice picks\n` +
+          (settled ? `${correct}/${pickCount} ${grid}\n` : 'My practice picks are locked.\n') +
+          'Fictional matchups. Think you can beat my picks?');
+    } catch {
+      setShareError('Sharing could not open. Please try again.');
+    }
+  }
+
+  return (
+    <View style={styles.stack}>
+      <Row style={styles.between}>
+        <Text style={type.title}>Practice slate</Text>
+        <Tag label={settled ? `${points} pts` : `${selectedCount}/${pickCount}`} tone="accent" />
+      </Row>
+      <Notice title="Fictional matchups">
+        Sample questions with invented results to learn the format. 100 practice points per correct pick. No money, no wagers.
+      </Notice>
+      {predictions.map((item, i) => {
+        const selected = state.picks[item.id];
+        return (
+          <FadeIn key={item.id} delay={Math.min(i, 6) * 40}>
+            <Card style={styles.questionCard}>
+              <Text style={type.eyebrow}>{item.category}</Text>
+              <Text style={type.heading}>{item.question}</Text>
+              {item.choices.map((choice, index) => {
+                let choiceState: ChoiceState = selected === index ? 'selected' : 'idle';
+                if (settled) {
+                  if (index === item.correctIndex) choiceState = selected === index ? 'correct' : 'reveal';
+                  else choiceState = selected === index ? 'incorrect' : 'dimmed';
+                }
+                return (
+                  <Choice key={choice} label={choice} state={choiceState} disabled={state.stage !== 'picking'}
+                    accessibilityLabel={`${item.question} ${choice}`}
+                    onPress={() => dispatch({ type: 'pick', id: item.id, choice: index })} />
+                );
+              })}
+              {settled && <Text style={type.small}>{item.simulatedResult}</Text>}
+            </Card>
+          </FadeIn>
+        );
+      })}
+
+      {state.stage === 'picking' && (
+        <Button label={ready ? `Lock all ${pickCount} picks` : `${pickCount - selectedCount} picks to go`} disabled={!ready}
+          feedback="heavy" onPress={() => dispatch({ type: 'lock' })} />
+      )}
+      {state.stage === 'locked' && (
+        <Button label="Simulate results" icon="▶" onPress={() => {
+          dispatch({ type: 'settle' });
+          if (correct >= pickCount / 2) haptic.success(); else haptic.warning();
+        }} />
+      )}
+      {settled && (
+        <FadeIn>
+          <Card tone="raised" style={styles.center}>
+            <Text style={type.eyebrow}>Practice score</Text>
+            <Text style={styles.big}>{points}<Text style={styles.bigOf}>/{pickCount * POINTS_PER_PICK}</Text></Text>
+            <Text style={type.muted}>{correct} of {pickCount} correct</Text>
+          </Card>
+        </FadeIn>
+      )}
+      {state.stage !== 'picking' && <Button label={settled ? 'Share your result' : 'Share your picks'} icon="↗" variant="secondary" onPress={sharePicks} />}
+      {settled && <Button label="Reset practice slate" variant="ghost" onPress={() => dispatch({ type: 'reset' })} />}
+      {!!shareError && <Text style={type.small}>{shareError}</Text>}
+    </View>
+  );
 }
+
+/* ================================================================ screen */
 
 export default function SportsPredictionsScreen() {
   const params = useLocalSearchParams<{ sport?: string }>();
@@ -730,202 +717,64 @@ export default function SportsPredictionsScreen() {
   if (params.sport !== undefined && (!section || section.id === 'boston')) {
     return <Redirect href="/" />;
   }
+  return <PredictionsScreen key={section?.id ?? 'all'} section={section} />;
+}
+
+function PredictionsScreen({ section }: { section?: FanSection }) {
+  const theme = section ?? fanSections[0];
   const predictions = section
     ? allPredictions.filter((item) => item.team === section.name)
     : allPredictions.filter((item) => fanSections.some(({ name }) => name === item.team));
-  return (
-    <PredictionGame
-      key={section?.id ?? 'all'}
-      predictions={predictions}
-      sportId={section?.id}
-      categoryName={section?.name ?? 'Boston sports'}
-    />
-  );
-}
-
-function PredictionGame({ predictions, sportId, categoryName }: {
-  predictions: Prediction[];
-  sportId?: string;
-  categoryName: string;
-}) {
-  const [state, dispatch] = useReducer(
-    (current: State, action: Action) => predictionReducer(current, action, predictions),
-    initialState
-  );
-  const [shareError, setShareError] = useState('');
-  const theme = getFanSection(sportId) ?? fanSections[0];
-  const { slate, failed, reload } = useLiveSlate(sportId);
-  const legacy = !sportId || slate === null;
-  const pickCount = predictions.length;
-  const maxPoints = pickCount * POINTS_PER_PICK;
-  const selectedCount = predictions.filter((item) => state.picks[item.id] !== undefined).length;
-  const ready = completePicks(state.picks, predictions);
-  const settled = state.stage === 'settled';
-  const correct = countCorrect(state.picks, predictions);
-  const points = correct * POINTS_PER_PICK;
-
-  async function sharePicks() {
-    try {
-      setShareError('');
-      const summary = predictions.map((item) =>
-        `${item.question} — ${item.choices[state.picks[item.id]]}`
-      ).join('\n');
-      await Share.share({
-        message: `${categoryName} Predictions · DEMO\n` +
-          (settled ? `${correct}/${pickCount} correct · ${points}/${maxPoints} practice points\n` : 'My demo picks are locked.\n') +
-          summary + '\nFictional matchups and results. Think you can beat my picks?',
-      });
-    } catch {
-      setShareError('Sharing could not open. Please try again.');
-    }
-  }
+  const isCeltics = section?.id === 'celtics';
+  const { slate, failed, reload } = useLiveSlate(section?.id);
+  const legacy = !section || slate === null;
 
   return (
-    <SafeAreaView style={[styles.screen, { backgroundColor: theme.gameBackground }]}>
-      <StatusBar style="light" />
-      <ScrollView contentContainerStyle={styles.content}>
-        <Link
-          href={sportId ? { pathname: '/fan-challenges', params: { sport: sportId } } : '/'}
-          dismissTo
-          style={styles.link}
-        >← Back to challenges</Link>
-        <Text style={styles.label}>{legacy && sportId !== 'celtics' ? 'BOSTON SPORTS · DEMO' : 'BOSTON SPORTS'}</Text>
-        <Text style={styles.title}>Make your picks.</Text>
-        <Text style={styles.team}>{categoryName} challenges</Text>
-        {slate && <LivePredictions slate={slate} name={categoryName} surface={theme.surface} theme={theme.gameBackground} refresh={reload} />}
-        {sportId && slate === undefined && !failed && (
-          <Text style={styles.secondary}>Loading predictions…</Text>
-        )}
-        {failed && (
-          <Pressable accessibilityRole="button" style={styles.option} onPress={reload}>
-            <Text style={styles.optionText}>Could not refresh predictions. Tap to retry.</Text>
-          </Pressable>
-        )}
-        {legacy && sportId === 'celtics' && <CelticsSchedule />}
-        {legacy && sportId === 'celtics' && <CelticsPickResult />}
-        {legacy && (sportId === 'patriots' || sportId === 'bruins') && (
-          <TeamSchedule team={sportId} surface={theme.surface} />
-        )}
-        {legacy && sportId !== 'celtics' && <>
-        <View style={[styles.notice, { backgroundColor: theme.surface }]}>
-          <Text style={styles.noticeTitle}>Fictional practice slate</Text>
-          <Text style={styles.secondary}>
-            These are sample matchups and invented results, not upcoming games.
-            Each correct pick earns 100 practice points. No money or wagers.
-          </Text>
-        </View>
-        <Text style={styles.status} accessibilityLiveRegion="polite">
-          {state.stage === 'picking' ? `${selectedCount} of ${pickCount} picks selected`
-            : settled ? 'Demo results are in.' : 'Picks locked. Waiting for demo results.'}
-        </Text>
-        {predictions.map((item) => {
-          const selected = state.picks[item.id];
-          const won = selected === item.correctIndex;
-          return (
-            <View key={item.id} style={[styles.card, { backgroundColor: theme.surface }]}>
-              <Text style={styles.label}>{item.team.toUpperCase()} · {item.category}</Text>
-              <Text style={styles.question}>{item.question}</Text>
-              <View style={styles.options}>
-                {item.choices.map((choice, index) => (
-                  <Pressable
-                    key={choice}
-                    accessibilityRole="button"
-                    accessibilityLabel={`${item.question} ${choice}`}
-                    accessibilityState={{ selected: selected === index, disabled: state.stage !== 'picking' }}
-                    disabled={state.stage !== 'picking'}
-                    onPress={() => dispatch({ type: 'pick', id: item.id, choice: index })}
-                    style={({ pressed }) => [styles.option, selected === index && [styles.selected, { backgroundColor: theme.gameBackground }], pressed && styles.pressed]}
-                  >
-                    <Text style={styles.optionText}>{selected === index ? '✓ ' : ''}{choice}</Text>
-                  </Pressable>
-                ))}
-              </View>
-              {state.stage !== 'picking' && (
-                <Text style={styles.secondary}>Your locked pick: {item.choices[selected]}</Text>
-              )}
-              {settled && (
-                <View style={styles.result}>
-                  <Text style={styles.secondary}>{item.simulatedResult}</Text>
-                  <Text style={[styles.resultText, won ? styles.correct : styles.incorrect]}>
-                    {won ? 'Correct · +100 points' : 'Incorrect · 0 points'}
-                  </Text>
-                </View>
-              )}
-            </View>
-          );
-        })}
-
-        {state.stage === 'picking' && (
-          <>
-            <Text style={styles.secondary}>You can change any pick until you lock the slate.</Text>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityState={{ disabled: !ready }}
-              disabled={!ready}
-              onPress={() => dispatch({ type: 'lock' })}
-              style={[styles.button, { backgroundColor: theme.surface }, !ready && styles.disabled]}
-            >
-              <Text style={styles.buttonText}>{ready ? `Lock ${pickCount === 1 ? 'your pick' : `all ${pickCount} picks`}` : 'Choose a pick for every question'}</Text>
-            </Pressable>
-          </>
-        )}
-        {state.stage === 'locked' && (
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => dispatch({ type: 'settle' })}
-            style={[styles.button, { backgroundColor: theme.surface }]}
-          >
-            <Text style={styles.buttonText}>Simulate demo results</Text>
-          </Pressable>
-        )}
-        {settled && (
-          <View style={[styles.notice, { backgroundColor: theme.surface }]}>
-            <Text style={styles.score}>{points} / {maxPoints}</Text>
-            <Text style={styles.question}>{correct} of {pickCount} predictions correct</Text>
-            <Text style={styles.secondary}>Practice points only. Rankings have not changed.</Text>
-          </View>
-        )}
-        {state.stage !== 'picking' && (
-          <Pressable accessibilityRole="button" onPress={sharePicks} style={[styles.shareButton, { backgroundColor: theme.surface }]}>
-            <Text style={styles.buttonText}>{settled ? 'Share your result →' : 'Share your picks →'}</Text>
-          </Pressable>
-        )}
-        {shareError ? <Text style={styles.secondary}>{shareError}</Text> : null}
-        <Text style={styles.secondary}>
-          This demo resets when the screen is reopened. Real schedules, start-time locks,
-          saved predictions, and verified results will be connected later.
-        </Text>
-        </>}
-      </ScrollView>
-    </SafeAreaView>
+    <Screen
+      section={theme}
+      back={section ? { pathname: '/fan-challenges', params: { sport: section.id } } : '/'}
+      backLabel="Back to challenges"
+      eyebrow={`${section?.name ?? 'Boston sports'} · Game predictions`}
+      title="Make your picks"
+      subtitle={isCeltics ? 'Call the next game’s numbers. See how you did after the final buzzer.' : undefined}
+    >
+      {section && slate && <SharedPredictions section={section} slate={slate} refresh={reload} />}
+      {section && slate === undefined && !failed && <Skeleton />}
+      {failed && <Button label="Could not refresh predictions. Tap to retry." variant="secondary" onPress={reload} />}
+      {legacy && isCeltics && <CelticsNextGame />}
+      {legacy && isCeltics && <CelticsLatestResult />}
+      {legacy && (section?.id === 'patriots' || section?.id === 'bruins') && <TeamNextGame team={section.id} name={section.name} />}
+      {legacy && !isCeltics && <PracticeSlate predictions={predictions} categoryName={section?.name ?? 'Boston sports'} />}
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#101218' },
-  content: { padding: 24, paddingBottom: 40, gap: 20, width: '100%', maxWidth: 600, alignSelf: 'center' },
-  link: { color: '#85B0FF', fontSize: 16, paddingVertical: 8 },
-  label: { color: '#FFD477', fontSize: 12, fontWeight: '800', lineHeight: 18 },
-  title: { color: '#FFFFFF', fontSize: 36, fontWeight: '900' },
-  team: { color: '#85B0FF', fontSize: 18, fontWeight: '700' },
-  notice: { padding: 20, backgroundColor: '#242331', borderRadius: 18, gap: 10 },
-  noticeTitle: { color: '#FFD477', fontSize: 18, fontWeight: '800' },
-  secondary: { color: '#BDC3D0', fontSize: 15, lineHeight: 23 },
-  status: { color: '#FFFFFF', fontSize: 18, fontWeight: '700' },
-  card: { backgroundColor: '#1D2230', padding: 20, borderRadius: 18, gap: 16 },
-  question: { color: '#FFFFFF', fontSize: 21, fontWeight: '700', lineHeight: 29 },
-  options: { gap: 12 },
-  option: { padding: 16, borderRadius: 12, borderWidth: 2, borderColor: '#62718B', minHeight: 56, justifyContent: 'center' },
-  selected: { borderColor: '#85B0FF', backgroundColor: '#233B65' },
-  optionText: { color: '#FFFFFF', fontSize: 17, fontWeight: '600' },
-  pressed: { opacity: 0.7 },
-  result: { gap: 10, borderTopWidth: 1, borderTopColor: '#46516A', paddingTop: 16 },
-  resultText: { fontSize: 17, fontWeight: '800' },
-  correct: { color: '#81D9A4' },
-  incorrect: { color: '#FF9CAA' },
-  button: { backgroundColor: '#2357C7', padding: 18, minHeight: 58, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
-  buttonText: { color: '#FFFFFF', fontSize: 17, fontWeight: '800', textAlign: 'center' },
-  disabled: { opacity: 0.45 },
-  score: { color: '#FFD477', fontSize: 40, fontWeight: '900' },
-  shareButton: { backgroundColor: '#34405C', padding: 18, borderRadius: 14, minHeight: 58, justifyContent: 'center' },
+  flex: { flex: 1 },
+  stack: { gap: space.md },
+  between: { justifyContent: 'space-between' },
+  alignEnd: { alignItems: 'flex-end' },
+  center: { alignItems: 'center', paddingVertical: space.xl },
+  hero: { gap: space.lg },
+  matchup: { gap: 2 },
+  at: { marginVertical: 2 },
+  matchupDetail: { marginTop: space.sm },
+  questionCard: { gap: space.md },
+  ou: {
+    flex: 1, minHeight: 64, borderRadius: radius.md, borderWidth: 1.5, borderColor: palette.border,
+    backgroundColor: palette.overlay, alignItems: 'center', justifyContent: 'center', gap: 2,
+  },
+  ouLabel: { color: palette.textMuted, fontSize: 13, fontWeight: '800', letterSpacing: 0.6, textTransform: 'uppercase' },
+  ouValue: { color: palette.text, fontSize: 22, fontWeight: '900', fontVariant: ['tabular-nums'] },
+  dim: { opacity: 0.45 },
+  scoreboard: { flexDirection: 'row', alignItems: 'center', gap: space.md },
+  scoreTeam: { flex: 1, gap: 2 },
+  scoreMid: { alignItems: 'center', gap: 2 },
+  scoreValue: { ...type.number, fontSize: 40, lineHeight: 46 },
+  resultRow: { flexDirection: 'row', gap: space.md, paddingTop: space.md, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border },
+  resultMark: { fontSize: 20, fontWeight: '900', width: 22, textAlign: 'center' },
+  skeleton: { gap: 10, paddingVertical: space.sm },
+  skeletonLine: { height: 14, borderRadius: 7, backgroundColor: palette.overlayStrong },
+  big: { ...type.number, fontSize: 60, lineHeight: 66 },
+  bigOf: { fontSize: 24, color: palette.textMuted },
 });

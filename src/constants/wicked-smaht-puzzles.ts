@@ -5277,3 +5277,12 @@ export const puzzles: Record<string, Puzzle | undefined> = {
     "playerSource": "https://en.wikipedia.org/wiki/Boston_Red_Sox_all-time_roster"
   }
 };
+
+/** Every player on the 2024 Celtics championship roster. */
+export const celtics2024Answers = [
+  'Jayson Tatum', 'Jrue Holiday', 'Jaylen Brown', 'Kristaps Porziņģis',
+  'Derrick White', 'Payton Pritchard', 'Oshae Brissett', 'Drew Peterson',
+  'JD Davison', 'Xavier Tillman', 'Jordan Walsh', 'Sam Hauser',
+  'Luke Kornet', 'Al Horford', 'Jaden Springer', 'Svi Mykhailiuk',
+  'Neemias Queta',
+];

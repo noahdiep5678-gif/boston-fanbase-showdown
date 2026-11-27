@@ -177,7 +177,10 @@ async function syncTeam(team: Team, apiKey: string, observedAt: string, signal: 
 }
 
 Deno.serve(async (request) => {
-  const token = Deno.env.get('TEAM_PREDICTIONS_SYNC_TOKEN');
+  const requestedTeam = new URL(request.url).searchParams.get('team');
+  // The initial Patriots-only rollout can use the existing production Cron credential.
+  const token = Deno.env.get('TEAM_PREDICTIONS_SYNC_TOKEN')
+    ?? (requestedTeam === 'patriots' ? Deno.env.get('CELTICS_SCORE_SYNC_TOKEN') : undefined);
   if (!token || request.headers.get('x-score-sync-token') !== token) return new Response(null, { status: 401 });
   if (request.method !== 'POST') return new Response(null, { status: 405 });
 
@@ -192,7 +195,6 @@ Deno.serve(async (request) => {
   const observedAt = new Date().toISOString();
   const results: Record<string, number | string> = {};
 
-  const requestedTeam = new URL(request.url).searchParams.get('team');
   if (requestedTeam !== null && !Object.hasOwn(teams, requestedTeam)) {
     return Response.json({ error: 'Unknown team' }, { status: 400 });
   }

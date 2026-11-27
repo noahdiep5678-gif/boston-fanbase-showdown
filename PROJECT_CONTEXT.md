@@ -7,13 +7,25 @@ Updated November 24, 2026. Start with [AGENTS.md](AGENTS.md) for repository and 
 - **Stadium Pulse** with **Boston** beneath it is the current launch title. Boston Fanbase Showdown is the previous product name and still appears in the GitHub repository name. The older Red vs Blue rivalry and permanent team assignment are archived.
 - The MVP sports are Celtics, Patriots, and Bruins. The Red Sox sit out the current MVP because they are out of season. Preserve historical content and data for a future return.
 - The swipe order is Celtics, Patriots, Bruins, then General Boston Trivia. Team selection opens challenges and users can play across teams. Keep the minimalist layout and the green, blue, and yellow team colors through the games. The user approved the 56-unit vertical gap between game choices.
-- The opening uses a muted Bruins → Celtics → Patriots montage. The first two clips are each 1.5 seconds around the scoring moment. The full Patriots clip is about 4.47 seconds. The clips share the same centered frame and black surround. The title fades in, holds still for 1.5 seconds, then shakes with increasing intensity for a full second before shattering into the Celtics carousel. Reduced Motion skips the shake and shatter.
+- The opening uses a muted Bruins → Celtics → Patriots montage. The Bruins goal runs for 1.5 seconds, the November 26 Celtics shot runs for 1.75 seconds, and the full Patriots clip is about 4.47 seconds. The clips share the same centered frame and black surround. The large, stacked white title appears on black with three full heartbeat pulses over three seconds, then shakes with increasing intensity for a full second before shattering into the Celtics carousel. Reduced Motion skips the heartbeat, shake, and shatter.
 - The team menu offers Wicked Smaht Daily Trivia and Game Predictions. General Boston offers a short practice quiz and Where in Boston. Wicked Smaht should emphasize curated, diverse daily questions with Boston sports and culture, satisfying answer discovery, and easy result sharing. DailyTens inspired the clean presentation. The app has its own design and content.
 - Sports Predictions shows the **next game's picks and the latest completed game's results**. Keep older outcomes in storage for future rankings. Prefer matchup-specific totals, team scores, margins, and eventually player stats over simply asking who will win. MVP predictions involve no wagering or cash prizes.
 - The rankings design calls for the top five fans per active team and overall Boston Superfans across eligible scored challenges. Current screens have empty standings. An authoritative scoring ledger, team comparison formula, weekly boundaries, tie rules, and profile/identity recovery remain open. Practice scores should stay out of standings.
 - Longer-term winner privileges discussed for the sports fan-base format include the winning fan base voting on the next week's challenge category and each sport's top fan proposing a question subject to editorial review and creator credit. Voting eligibility and the exact mechanics still need decisions.
 
 ## Current implementation and verification
+
+The post-intro UI incorporates the `ui-overhaul` carousel, desktop dashboard, team menus, rankings presentation, and additional games. The existing intro still runs before the redesigned home screen. The Boston trivia and map screens use the Supabase calendar for daily mode and the UI-overhaul content bank for practice. The redesigned predictions screen uses the shared live slate when available and the existing Celtics or practice flows otherwise.
+
+### Daily trivia calendar
+
+Wicked Smaht, General Boston Trivia, and Where in Boston read `public.daily_puzzles` by category and Boston calendar date. The read policy unlocks each dated entry at midnight in `America/New_York`, including daylight saving changes. The app refreshes the date when it returns to the foreground. Publishing needs no cron job.
+
+The [starter calendar](supabase/operations/schedule-daily-trivia-november-2026.sql) schedules Celtics, Patriots, Bruins, and Boston for November 26–28. To extend the calendar, use the same insert format and add future dates as a batch. Each sports entry needs a clear eligibility prompt, at least ten distinct verified answers, a display year, and a source URL. The Boston entry needs a theme and three sourced multiple-choice questions, each with a zero-based correct answer index. Check each set before scheduling it. The insert preserves existing rows and the calendar needs fresh content before the last scheduled date.
+
+The [Where in Boston starter calendar](supabase/operations/schedule-where-in-boston-november-2026.sql) runs for the same dates. Use category `where-in-boston`, a theme, and three distinct landmarks with map coordinates in decimal degrees, ordered Easy, Medium, and Hard. The game offers its practice locations when no daily set is scheduled.
+
+The [Mystery and Timeline calendar](supabase/operations/schedule-mystery-timeline-november-2026.sql) schedules November 26–28. For `mystery-patriots`, use a verified player name that exactly matches the Patriots player bank. For `timeline-celtics`, `timeline-patriots`, `timeline-bruins`, and `timeline-boston`, provide five verified events from distinct years. An empty date offers practice. Mystery Celtics and Mystery Bruins continue using their existing date-based player selection.
 
 | Area | Current state |
 | --- | --- |
@@ -33,9 +45,11 @@ Updated November 24, 2026. Start with [AGENTS.md](AGENTS.md) for repository and 
 
 Hosted staging is active at $0/month in **Stadium Pulse Staging** (`vvfvvxgjmenelktveixr`). The migration and both prediction Edge Functions are deployed. A rolled-back staging test verified game publication, pick privacy, deadline enforcement, and grading against the original lines. Lint, TypeScript, and the local integration test passed after the NBA worker was narrowed to 60 days of history to fit the free provider limits.
 
-The live worker published three Celtics games and one Patriots game. The staging Vault token is configured, and staging Cron runs Celtics at minutes 0, 15, 30, and 45 and Patriots at minutes 5, 20, 35, and 50. A scheduled Patriots run and a manual execution of the exact Celtics Cron command both returned HTTP 200 through `pg_net`. The staging jobs target the staging URL directly. Bruins automation is off because the current BALLDONTLIE NHL games endpoint requires a paid tier. Production was untouched.
+The staging worker published three Celtics games and one Patriots game. Staging Cron runs Celtics at minutes 0, 15, 30, and 45 and Patriots at minutes 5, 20, 35, and 50. Both jobs returned HTTP 200 through `pg_net`. Staging anonymous sign-in is enabled, and the founder confirmed the Patriots matchup appeared in Expo Go. Bruins automation is off because the current BALLDONTLIE NHL games endpoint requires a paid tier.
 
-When resuming, check a scheduled Celtics run in Cron and `net._http_response`, enable staging anonymous sign-in, and verify picks and results on iPhone using staging credentials while preserving the existing production guest session. Decide how to supply Bruins fixtures and scores without a paid feed. The existing legacy Celtics iPhone check is still pending.
+On November 26, 2026 (Boston time), production received the shared schema and `sync-team-predictions` for Patriots only. A manual worker call returned HTTP 200 and published Patriots at Chargers with three questions. Production Cron job `sync-team-predictions-patriots` runs at minutes 10, 25, 40, and 55. For this rollout, it uses the existing production Cron token and the worker accepts that token only for an explicit Patriots request and only when `TEAM_PREDICTIONS_SYNC_TOKEN` is unset. Update the Cron credential as part of configuring a dedicated production token. The existing Celtics job and picks remain on their legacy path. Bruins are still practice-only in production.
+
+When resuming, verify the first real Patriots grading on iPhone and plan the Celtics cutover. The founder confirmed the legacy Celtics result displayed the expected final score, grades, and correct count. Decide how to supply Bruins fixtures and scores without a paid feed.
 
 The [migration](supabase/migrations/20261125000000_team_predictions.sql), [worker](supabase/functions/sync-team-predictions/index.ts), app integration, and [cron SQL](supabase/operations/schedule-team-predictions.sql) support the rollout below. Verify production access and live behavior before production rollout.
 
@@ -65,6 +79,15 @@ The three question types are combined points, Celtics points, and Celtics margin
 The client uses `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY`. Anonymous sign-in supplies a persistent fan identity. The schedule functions use `BALLDONTLIE_API_KEY` server-side. The reported Celtics worker uses `CELTICS_SCORE_SYNC_TOKEN` and the `x-score-sync-token` header from its scheduled call. Share access through the team's approved credential channels. Keep service keys, provider keys, Vault values, and user data out of commits and logs.
 
 Daily content and game displays use `America/New_York`. Store game start times as timezone-aware instants. When expanding automation, address postponements, cancellations, updates to a game already on screen, official score corrections, and retry-safe settlement.
+
+## Weekly rankings
+
+The `weekly_rankings` migration is applied to Stadium Pulse Staging and production. Supabase recorded it as `20261127021254` in staging and `20261127023237` in production. The staging Expo Go preview uses the staging Supabase URL and publishable key.
+
+- The Celtics, Patriots, Bruins, and Boston Superfans boards show the top five for the current Boston week. A fan outside the top five can see their own place. Standings refresh on focus and roll over Monday at midnight Boston time. Total points determine place, then rounds played, then a stable account order.
+- Supabase grades scheduled Wicked Smaht, Timeline, General Boston Trivia, Where in Boston?, and Mystery Patriots from submitted answers. Each round is worth up to 1,000 points and the first result counts. The app retries pending scores on the Rankings screen. The server accepts today's or yesterday's puzzle date.
+- Final live prediction cards add 333 points for one correct pick, 667 for two, and 1,000 for three. Practice and bundled Mystery Celtics/Bruins are excluded. Bruins live prediction points require a working NHL feed. The standings read both the shared prediction feed and the legacy Celtics feed when present.
+- Guest aliases are generated from the existing Supabase account. Device history remains separate from the ranked ledger. Daily content currently exposes its answer data to the app, so this is suitable for casual competition.
 
 ## Working together
 

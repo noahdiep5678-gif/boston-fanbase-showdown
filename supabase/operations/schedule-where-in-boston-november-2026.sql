@@ -1,0 +1,7 @@
+-- Landmark reference: https://en.wikipedia.org/wiki/List_of_National_Historic_Landmarks_in_Boston
+-- Each pin is the named landmark, with the existing full-credit radius of 100 m.
+insert into public.daily_puzzles (team, puzzle_date, prompt, roster_data) values
+  ('where-in-boston', '2026-11-26', 'From the Public Garden to Charlestown', '{"locations":[{"name":"Boston Public Garden","difficulty":"Easy","coordinate":{"latitude":42.3541,"longitude":-71.0699}},{"name":"Bunker Hill Monument","difficulty":"Medium","coordinate":{"latitude":42.3763,"longitude":-71.0608}},{"name":"USS Cassin Young","difficulty":"Hard","coordinate":{"latitude":42.3722,"longitude":-71.0545}}]}'::jsonb),
+  ('where-in-boston', '2026-11-27', 'Downtown and the North End', '{"locations":[{"name":"Faneuil Hall","difficulty":"Easy","coordinate":{"latitude":42.3601,"longitude":-71.0563}},{"name":"Old North Church","difficulty":"Medium","coordinate":{"latitude":42.3665,"longitude":-71.0546}},{"name":"Boston Old City Hall","difficulty":"Hard","coordinate":{"latitude":42.358,"longitude":-71.0593}}]}'::jsonb),
+  ('where-in-boston', '2026-11-28', 'From Copley Square to the Freedom Trail', '{"locations":[{"name":"Boston Public Library, Central Library","difficulty":"Easy","coordinate":{"latitude":42.3496,"longitude":-71.0776}},{"name":"Old State House","difficulty":"Medium","coordinate":{"latitude":42.3587,"longitude":-71.0574}},{"name":"Old South Meeting House","difficulty":"Hard","coordinate":{"latitude":42.357,"longitude":-71.0587}}]}'::jsonb)
+on conflict (team, puzzle_date) do nothing;
